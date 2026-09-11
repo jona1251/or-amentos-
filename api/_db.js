@@ -1,5 +1,11 @@
-const { neon } = require('@neondatabase/serverless');
+const { neon, Pool, neonConfig } = require('@neondatabase/serverless');
 
+try {
+  if (typeof WebSocket === 'undefined') neonConfig.webSocketConstructor = require('ws');
+} catch (_) {}
+
+const RLS_ROLE = 'orcafacil_app';
+const RLS_TABLES = ['user_settings','clients','products','budgets','budget_items','contracts'];
 let schemaPromise = null;
 
 function resolveDatabaseUrl() {
@@ -27,6 +33,139 @@ function getSql() {
   const { url } = resolveDatabaseUrl();
   if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
   return neon(url);
+}
+
+async function ensurePolicy(sql, tableName, policyName, ddl) {
+  const rows = await sql`
+    SELECT 1 FROM pg_policies
+    WHERE schemaname='public' AND tablename=${tableName} AND policyname=${policyName}
+    LIMIT 1
+  `;
+  if (rows.length) return;
+  try {
+    await sql(ddl);
+  } catch (err) {
+    const message = String(err?.message || '');
+    if (err?.code === '42710' || message.includes('already exists')) return;
+    throw err;
+  }
+}
+
+async function ensureRls(sql) {
+  await sql`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='orcafacil_app') THEN
+        CREATE ROLE orcafacil_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+      ELSE
+        ALTER ROLE orcafacil_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+      END IF;
+    END
+    $$
+  `;
+
+  await sql`GRANT orcafacil_app TO CURRENT_USER`;
+  await sql`GRANT USAGE ON SCHEMA public TO orcafacil_app`;
+  await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE user_settings, clients, products, budgets, budget_items, contracts TO orcafacil_app`;
+
+  await sql`ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY`;
+  await sql`ALTER TABLE clients ENABLE ROW LEVEL SECURITY`;
+  await sql`ALTER TABLE products ENABLE ROW LEVEL SECURITY`;
+  await sql`ALTER TABLE budgets ENABLE ROW LEVEL SECURITY`;
+  await sql`ALTER TABLE budget_items ENABLE ROW LEVEL SECURITY`;
+  await sql`ALTER TABLE contracts ENABLE ROW LEVEL SECURITY`;
+
+  const companyCtx = "NULLIF(current_setting('app.current_company_id', true), '')::uuid";
+  const userCtx = "NULLIF(current_setting('app.current_user_id', true), '')::uuid";
+
+  await ensurePolicy(sql, 'user_settings', 'orca_user_settings_owner', `
+    CREATE POLICY orca_user_settings_owner ON user_settings
+    FOR ALL TO orcafacil_app
+    USING (company_id=${companyCtx} AND user_id=${userCtx})
+    WITH CHECK (company_id=${companyCtx} AND user_id=${userCtx})
+  `);
+
+  await ensurePolicy(sql, 'clients', 'orca_clients_owner', `
+    CREATE POLICY orca_clients_owner ON clients
+    FOR ALL TO orcafacil_app
+    USING (company_id=${companyCtx} AND owner_user_id=${userCtx})
+    WITH CHECK (company_id=${companyCtx} AND owner_user_id=${userCtx})
+  `);
+
+  await ensurePolicy(sql, 'products', 'orca_products_owner', `
+    CREATE POLICY orca_products_owner ON products
+    FOR ALL TO orcafacil_app
+    USING (company_id=${companyCtx} AND owner_user_id=${userCtx})
+    WITH CHECK (company_id=${companyCtx} AND owner_user_id=${userCtx})
+  `);
+
+  await ensurePolicy(sql, 'budgets', 'orca_budgets_owner', `
+    CREATE POLICY orca_budgets_owner ON budgets
+    FOR ALL TO orcafacil_app
+    USING (company_id=${companyCtx} AND owner_user_id=${userCtx})
+    WITH CHECK (
+      company_id=${companyCtx}
+      AND owner_user_id=${userCtx}
+      AND EXISTS (
+        SELECT 1 FROM clients c
+        WHERE c.id=budgets.client_id
+          AND c.company_id=${companyCtx}
+          AND c.owner_user_id=${userCtx}
+      )
+    )
+  `);
+
+  await ensurePolicy(sql, 'budget_items', 'orca_budget_items_owner', `
+    CREATE POLICY orca_budget_items_owner ON budget_items
+    FOR ALL TO orcafacil_app
+    USING (
+      EXISTS (
+        SELECT 1 FROM budgets b
+        WHERE b.id=budget_items.budget_id
+          AND b.company_id=${companyCtx}
+          AND b.owner_user_id=${userCtx}
+      )
+    )
+    WITH CHECK (
+      EXISTS (
+        SELECT 1 FROM budgets b
+        WHERE b.id=budget_items.budget_id
+          AND b.company_id=${companyCtx}
+          AND b.owner_user_id=${userCtx}
+      )
+      AND (
+        budget_items.product_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM products p
+          WHERE p.id=budget_items.product_id
+            AND p.company_id=${companyCtx}
+            AND p.owner_user_id=${userCtx}
+        )
+      )
+    )
+  `);
+
+  await ensurePolicy(sql, 'contracts', 'orca_contracts_owner', `
+    CREATE POLICY orca_contracts_owner ON contracts
+    FOR ALL TO orcafacil_app
+    USING (company_id=${companyCtx} AND owner_user_id=${userCtx})
+    WITH CHECK (
+      company_id=${companyCtx}
+      AND owner_user_id=${userCtx}
+      AND EXISTS (
+        SELECT 1 FROM budgets b
+        WHERE b.id=contracts.budget_id
+          AND b.company_id=${companyCtx}
+          AND b.owner_user_id=${userCtx}
+      )
+      AND EXISTS (
+        SELECT 1 FROM clients c
+        WHERE c.id=contracts.client_id
+          AND c.company_id=${companyCtx}
+          AND c.owner_user_id=${userCtx}
+      )
+    )
+  `);
 }
 
 async function ensureSchema(sql) {
@@ -197,6 +336,8 @@ async function ensureSchema(sql) {
       await sql`CREATE INDEX IF NOT EXISTS idx_contracts_owner ON contracts(company_id, owner_user_id, updated_at DESC)`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_user_number ON budgets(company_id, owner_user_id, number) WHERE owner_user_id IS NOT NULL`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_contracts_user_number ON contracts(company_id, owner_user_id, number) WHERE owner_user_id IS NOT NULL`;
+
+      await ensureRls(sql);
     })();
   }
   try {
@@ -258,6 +399,110 @@ async function authenticate(sql, req) {
   return rows[0] || null;
 }
 
+function makeClientSql(client) {
+  return async function sql(strings, ...values) {
+    if (typeof strings === 'string') {
+      const params = Array.isArray(values[0]) ? values[0] : [];
+      const result = await client.query(strings, params);
+      return result.rows;
+    }
+    let text = '';
+    const params = [];
+    for (let i = 0; i < strings.length; i++) {
+      text += strings[i];
+      if (i < values.length) {
+        params.push(values[i]);
+        text += `$${params.length}`;
+      }
+    }
+    const result = await client.query(text, params);
+    return result.rows;
+  };
+}
+
+async function withRlsSql(companyId, user, fn) {
+  const { url } = resolveDatabaseUrl();
+  if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
+  if (!companyId || !user?.id) throw new Error('RLS_CONTEXT_REQUIRED');
+
+  const pool = new Pool({ connectionString: url, max: 1 });
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${RLS_ROLE}`);
+    await client.query(
+      "SELECT set_config('app.current_company_id',$1,true), set_config('app.current_user_id',$2,true), set_config('app.current_role',$3,true), set_config('row_security','on',true)",
+      [String(companyId), String(user.id), String(user.role || 'operador')]
+    );
+    const result = await fn(makeClientSql(client));
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
+    throw err;
+  } finally {
+    if (client) client.release();
+    try { await pool.end(); } catch (_) {}
+  }
+}
+
+async function getRlsStatus(sql) {
+  const roleRows = await sql`
+    SELECT rolname, rolsuper, rolbypassrls, rolcanlogin
+    FROM pg_roles WHERE rolname=${RLS_ROLE} LIMIT 1
+  `;
+  const membershipRows = await sql`SELECT pg_has_role(current_user, ${RLS_ROLE}, 'MEMBER') AS is_member`;
+  const tableRows = await sql`
+    SELECT c.relname AS table_name, c.relrowsecurity AS enabled
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public'
+      AND c.relname IN ('user_settings','clients','products','budgets','budget_items','contracts')
+  `;
+  const policyRows = await sql`
+    SELECT tablename, policyname
+    FROM pg_policies
+    WHERE schemaname='public'
+      AND policyname IN (
+        'orca_user_settings_owner','orca_clients_owner','orca_products_owner',
+        'orca_budgets_owner','orca_budget_items_owner','orca_contracts_owner'
+      )
+  `;
+  const enabled = new Set(tableRows.filter(x => x.enabled).map(x => x.table_name));
+  const role = roleRows[0] || null;
+  const ready = !!role
+    && role.rolsuper === false
+    && role.rolbypassrls === false
+    && membershipRows[0]?.is_member === true
+    && RLS_TABLES.every(t => enabled.has(t))
+    && policyRows.length >= RLS_TABLES.length;
+  return {
+    ready,
+    runtimeRole:RLS_ROLE,
+    runtimeRoleCanLogin:role?.rolcanlogin ?? null,
+    runtimeRoleBypassRls:role?.rolbypassrls ?? null,
+    runtimeRoleSuperuser:role?.rolsuper ?? null,
+    ownerCanSetRole:membershipRows[0]?.is_member ?? false,
+    enabledTables:[...enabled],
+    policyCount:policyRows.length
+  };
+}
+
 function send(res, status, body) { res.status(status).json(body); }
 
-module.exports = { getSql, ensureSchema, ensureCompany, ensureLegacyOwnership, authenticate, send, resolveDatabaseUrl };
+module.exports = {
+  getSql,
+  ensureSchema,
+  ensureCompany,
+  ensureLegacyOwnership,
+  authenticate,
+  withRlsSql,
+  getRlsStatus,
+  send,
+  resolveDatabaseUrl,
+  RLS_ROLE,
+  RLS_TABLES
+};
