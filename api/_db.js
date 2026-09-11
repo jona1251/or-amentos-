@@ -1,7 +1,29 @@
 const { neon } = require('@neondatabase/serverless');
 
+function resolveDatabaseUrl() {
+  const candidates = [
+    ['DATABASE_URL', process.env.DATABASE_URL],
+    ['POSTGRES_URL', process.env.POSTGRES_URL],
+    ['NEON_DATABASE_URL', process.env.NEON_DATABASE_URL],
+    ['NEON_POSTGRES_URL', process.env.NEON_POSTGRES_URL],
+    ['POSTGRES_PRISMA_URL', process.env.POSTGRES_PRISMA_URL]
+  ];
+  for (const [name, value] of candidates) {
+    if (typeof value === 'string' && /^postgres(ql)?:\/\//i.test(value)) return { url:value, source:name };
+  }
+  const { PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT } = process.env;
+  if (PGHOST && PGDATABASE && PGUSER && PGPASSWORD) {
+    const user = encodeURIComponent(PGUSER);
+    const pass = encodeURIComponent(PGPASSWORD);
+    const db = encodeURIComponent(PGDATABASE);
+    const port = PGPORT || '5432';
+    return { url:`postgresql://${user}:${pass}@${PGHOST}:${port}/${db}?sslmode=require`, source:'PG*' };
+  }
+  return { url:null, source:null };
+}
+
 function getSql() {
-  const url = process.env.DATABASE_URL;
+  const { url } = resolveDatabaseUrl();
   if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
   return neon(url);
 }
@@ -35,4 +57,4 @@ function send(res, status, body) {
   res.status(status).json(body);
 }
 
-module.exports = { getSql, ensureCompany, authenticate, send };
+module.exports = { getSql, ensureCompany, authenticate, send, resolveDatabaseUrl };
