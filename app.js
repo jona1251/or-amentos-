@@ -1,9 +1,9 @@
 (async()=>{
-  const parts=['cloud-sync.js','app-core.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-settings.js'];
+  const parts=['cloud-sync.js','app-core.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-settings.js','app-logout-fix.js'];
   for(const file of parts){
     await new Promise((resolve,reject)=>{
       const script=document.createElement('script');
-      script.src=file+'?v=ux4';
+      script.src=file+'?v=ux5';
       script.onload=resolve;
       script.onerror=()=>reject(new Error('Falha ao carregar '+file));
       document.head.appendChild(script);
