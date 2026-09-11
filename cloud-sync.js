@@ -19,10 +19,12 @@ function cloudSetState(state, text) {
   else { el.style.color = '#6b7280'; el.style.background = '#fff'; el.style.borderColor = '#e5e7eb'; }
 }
 
-async function cloudRequest(url, options = {}, token) {
+async function cloudRequest(url, options = {}, token, loginOverride) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   const key = token || window.auth?.pinHash;
+  const login = loginOverride || window.auth?.login;
   if (key) headers['x-orca-auth'] = key;
+  if (login) headers['x-orca-user'] = login;
   const res = await fetch(url, { ...options, headers });
   let body = {};
   try { body = await res.json(); } catch (_) {}
@@ -33,10 +35,12 @@ async function cloudRequest(url, options = {}, token) {
   }
   return body;
 }
+window.cloudRequest = cloudRequest;
+window.cloudIsReady = () => cloudReady;
 
 async function cloudStatus() {
   try {
-    const r = await cloudRequest('/api/auth', { method: 'GET' }, null);
+    const r = await cloudRequest('/api/auth', { method: 'GET' }, null, null);
     cloudReady = !!r.online;
     cloudSetState('online', 'Nuvem conectada');
     return r;
@@ -49,11 +53,17 @@ async function cloudStatus() {
 
 async function cloudRegisterCurrent() {
   if (!window.auth?.pinHash) return false;
+  const login = (window.auth.login || 'admin').toLowerCase();
   try {
-    await cloudRequest('/api/auth', {
+    const r = await cloudRequest('/api/auth', {
       method: 'POST',
-      body: JSON.stringify({ action: 'register', name: window.auth.name || 'Administrador', pinHash: window.auth.pinHash })
-    }, null);
+      body: JSON.stringify({ action: 'register', name: window.auth.name || 'Administrador', login, pinHash: window.auth.pinHash })
+    }, null, login);
+    if (r.user) {
+      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name };
+      window.setAppAuth?.(next);
+      await window.localPut('auth', next);
+    }
     return true;
   } catch (e) {
     if (e.message === 'USER_ALREADY_EXISTS') return false;
@@ -63,11 +73,17 @@ async function cloudRegisterCurrent() {
 
 async function cloudVerifyCurrent() {
   if (!window.auth?.pinHash) return false;
+  const login = (window.auth.login || 'admin').toLowerCase();
   try {
-    await cloudRequest('/api/auth', {
+    const r = await cloudRequest('/api/auth', {
       method: 'POST',
-      body: JSON.stringify({ action: 'login', pinHash: window.auth.pinHash })
-    }, null);
+      body: JSON.stringify({ action: 'login', login, pinHash: window.auth.pinHash })
+    }, null, login);
+    if (r.user) {
+      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name };
+      window.setAppAuth?.(next);
+      await window.localPut('auth', next);
+    }
     return true;
   } catch (_) { return false; }
 }
@@ -116,9 +132,10 @@ async function cloudInitialSync(existingLocalUser) {
   try {
     let allowed = await cloudVerifyCurrent();
     if (!allowed) allowed = await cloudRegisterCurrent();
-    if (!allowed) { cloudSetState('offline','PIN da nuvem diferente'); return; }
+    if (!allowed) { cloudSetState('offline','Acesso da nuvem diferente'); return; }
     if (existingLocalUser) await cloudUploadAll();
     await cloudPull();
+    window.refreshUserAccessUI?.();
   } catch (e) {
     console.warn('Cloud sync:', e);
     cloudSetState('offline', 'Modo local');
@@ -127,33 +144,44 @@ async function cloudInitialSync(existingLocalUser) {
 
 window.cloudAfterInit = async function() {
   const status = await cloudStatus();
-  if (!status) return;
+  if (!status) { window.refreshUserAccessUI?.(); return; }
   const hasLocal = !!window.auth?.pinHash;
+  if (hasLocal && !window.auth.login) {
+    const next = { ...window.auth, login:'admin', role:window.auth.role || 'admin' };
+    window.setAppAuth?.(next);
+    await window.localPut('auth', next);
+  }
   if (status.hasUser && !hasLocal) {
     document.getElementById('setup')?.classList.add('hide');
     document.getElementById('enter')?.classList.remove('hide');
     const hello = document.getElementById('hello');
-    if (hello) hello.textContent = 'Acesso online • digite seu PIN';
+    if (hello) hello.textContent = 'Entre com seu usuário e PIN';
     window.setAppAuth?.(null);
+    window.refreshUserAccessUI?.();
     return;
   }
   if (hasLocal) await cloudInitialSync(true);
+  window.refreshUserAccessUI?.();
 };
 
-window.cloudLoginByPin = async function(pin) {
+window.cloudLoginByPin = async function(pin, login='admin', silent=false) {
   try {
+    window.cloudLastLoginError = null;
+    const normalizedLogin = String(login || 'admin').trim().toLowerCase();
     const pinHash = await window.hash(pin);
-    const r = await cloudRequest('/api/auth', { method:'POST', body:JSON.stringify({ action:'login', pinHash }) }, null);
-    const newAuth = { id:'admin', name:r.user?.name || 'Administrador', pinHash };
+    const r = await cloudRequest('/api/auth', { method:'POST', body:JSON.stringify({ action:'login', login:normalizedLogin, pinHash }) }, null, normalizedLogin);
+    const newAuth = { id:'admin', name:r.user?.name || 'Usuário', login:r.user?.login || normalizedLogin, role:r.user?.role || 'operador', pinHash };
     window.setAppAuth?.(newAuth);
     await window.localPut('auth', newAuth);
     document.getElementById('login')?.classList.add('hide');
     const p = document.getElementById('loginPin'); if (p) p.value='';
     if (typeof window.syncAdminSide === 'function') window.syncAdminSide();
+    window.refreshUserAccessUI?.();
     await cloudPull();
     return true;
   } catch (e) {
-    if (typeof window.toast === 'function') window.toast(e.message === 'INVALID_PIN' ? 'PIN incorreto' : 'Não foi possível entrar na nuvem');
+    window.cloudLastLoginError = e.message;
+    if (!silent && typeof window.toast === 'function') window.toast(e.message === 'INVALID_CREDENTIALS' ? 'Usuário ou PIN incorreto' : 'Não foi possível entrar na nuvem');
     return false;
   }
 };
