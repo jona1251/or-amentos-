@@ -32,6 +32,11 @@ function getSql() {
   return neon(url);
 }
 
+async function runDynamic(sql, text, params = []) {
+  if (typeof sql?.query !== 'function') throw new Error('SQL_QUERY_API_UNAVAILABLE');
+  return sql.query(text, params);
+}
+
 async function policyExists(sql, tableName, policyName) {
   const rows = await sql`
     SELECT 1 FROM pg_policies
@@ -43,15 +48,15 @@ async function policyExists(sql, tableName, policyName) {
 
 async function ensurePolicy(sql, tableName, policyName, createDdl, alterDdl) {
   if (await policyExists(sql, tableName, policyName)) {
-    await sql(alterDdl);
+    await runDynamic(sql, alterDdl);
     return;
   }
   try {
-    await sql(createDdl);
+    await runDynamic(sql, createDdl);
   } catch (err) {
     const msg = String(err?.message || '');
     if (err?.code === '42710' || msg.includes('already exists')) {
-      await sql(alterDdl);
+      await runDynamic(sql, alterDdl);
       return;
     }
     throw err;
@@ -63,8 +68,9 @@ async function ensureRls(sql) {
   const userCtx = "NULLIF(current_setting('app.current_user_id', true), '')::uuid";
 
   for (const table of RLS_TABLES) {
-    await sql(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
-    await sql(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    if (!RLS_TABLES.includes(table)) throw new Error('INVALID_RLS_TABLE');
+    await runDynamic(sql, `ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    await runDynamic(sql, `ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
   }
 
   await ensurePolicy(sql,'user_settings','orca_user_settings_owner',
@@ -240,10 +246,14 @@ function makeClientSql(client) {
       const result = await client.query(strings, params);
       return result.rows;
     }
-    let text=''; const params=[];
+    let text='';
+    const params=[];
     for (let i=0;i<strings.length;i++) {
       text += strings[i];
-      if (i<values.length) { params.push(values[i]); text += `$${params.length}`; }
+      if (i<values.length) {
+        params.push(values[i]);
+        text += `$${params.length}`;
+      }
     }
     const result = await client.query(text, params);
     return result.rows;
@@ -254,6 +264,7 @@ async function withRlsSql(companyId, user, fn) {
   const { url } = resolveDatabaseUrl();
   if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
   if (!companyId || !user?.id) throw new Error('RLS_CONTEXT_REQUIRED');
+
   const pool = new Pool({ connectionString:url, max:1 });
   let client;
   try {
@@ -267,7 +278,9 @@ async function withRlsSql(companyId, user, fn) {
     await client.query('COMMIT');
     return result;
   } catch (err) {
-    if (client) { try { await client.query('ROLLBACK'); } catch (_) {} }
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
     throw err;
   } finally {
     if (client) client.release();
