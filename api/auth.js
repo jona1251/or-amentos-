@@ -1,6 +1,7 @@
 const { getSql, ensureCompany, send } = require('./_db');
 const { issueSession, getSessionUser, clearSession } = require('./_session');
 const { checkLoginRateLimit, recordFailedLogin, clearSuccessfulLogin } = require('./_rate_limit');
+const { notifyPrimaryAdminOfLogin } = require('./_notifications');
 
 function setRetryAfter(res, seconds) {
   const value = Math.max(1, Number(seconds || 1));
@@ -105,6 +106,11 @@ module.exports = async function handler(req, res) {
       const user = rows[0];
       await clearSuccessfulLogin(sql, company.id, login, req);
       await issueSession(sql, res, company.id, user.id);
+      try {
+        await notifyPrimaryAdminOfLogin(sql, company.id, user, req);
+      } catch (notifyErr) {
+        console.error('login notification', notifyErr);
+      }
       return send(res, 200, { ok: true, user: { id:user.id, name:user.name, login:user.local_id, role:user.role } });
     }
 
