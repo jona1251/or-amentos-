@@ -1,10 +1,9 @@
-const { getSql, ensureCompany, ensureLegacyOwnership, authenticate, send } = require('./_db');
+const { getSql, ensureCompany, ensureLegacyOwnership, authenticate, withRlsSql, send } = require('./_db');
 
 const toNum = v => Number(v || 0);
 const iso = v => v ? new Date(v) : new Date();
 
 async function ensureUserSettings(sql, companyId, userId) {
-  await ensureLegacyOwnership(sql, companyId);
   let rows = await sql`SELECT * FROM user_settings WHERE company_id=${companyId} AND user_id=${userId} LIMIT 1`;
   if (!rows.length) {
     rows = await sql`
@@ -172,42 +171,49 @@ async function snapshot(sql, companyId, userId) {
 
 module.exports = async function handler(req, res) {
   try {
-    const sql = getSql();
-    const company = await ensureCompany(sql);
-    const user = await authenticate(sql, req);
+    const adminSql = getSql();
+    const company = await ensureCompany(adminSql);
+    const user = await authenticate(adminSql, req);
     if (!user) return send(res, 401, { ok:false, error:'UNAUTHORIZED' });
-    await ensureLegacyOwnership(sql, company.id);
-    await ensureUserSettings(sql, company.id, user.id);
 
-    if (req.method === 'GET') return send(res, 200, { ok:true, data:await snapshot(sql, company.id, user.id) });
+    await ensureLegacyOwnership(adminSql, company.id);
+    await ensureUserSettings(adminSql, company.id, user.id);
 
-    if (req.method === 'POST') {
-      const store = req.body?.store;
-      const record = req.body?.record || {};
-      if (store === 'settings') await saveSettings(sql, company.id, user.id, record);
-      else if (store === 'clients') await saveClient(sql, company.id, user.id, record);
-      else if (store === 'products') await saveProduct(sql, company.id, user.id, record);
-      else if (store === 'budgets') await saveBudget(sql, company.id, user.id, record);
-      else if (store === 'contracts') await saveContract(sql, company.id, user.id, record);
-      else return send(res, 400, {ok:false,error:'INVALID_STORE'});
-      return send(res, 200, {ok:true});
-    }
+    return await withRlsSql(company.id, user, async sql => {
+      if (req.method === 'GET') return send(res, 200, { ok:true, data:await snapshot(sql, company.id, user.id) });
 
-    if (req.method === 'DELETE') {
-      const store = String(req.query?.store || '');
-      const id = String(req.query?.id || '');
-      if (!['clients','products','budgets','contracts'].includes(store) || !id) return send(res, 400, {ok:false,error:'INVALID_DELETE'});
-      if (store === 'clients') await sql`DELETE FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
-      if (store === 'products') await sql`DELETE FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
-      if (store === 'budgets') await sql`DELETE FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
-      if (store === 'contracts') await sql`DELETE FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
-      return send(res, 200, {ok:true});
-    }
+      if (req.method === 'POST') {
+        const store = req.body?.store;
+        const record = req.body?.record || {};
+        if (store === 'settings') await saveSettings(sql, company.id, user.id, record);
+        else if (store === 'clients') await saveClient(sql, company.id, user.id, record);
+        else if (store === 'products') await saveProduct(sql, company.id, user.id, record);
+        else if (store === 'budgets') await saveBudget(sql, company.id, user.id, record);
+        else if (store === 'contracts') await saveContract(sql, company.id, user.id, record);
+        else return send(res, 400, {ok:false,error:'INVALID_STORE'});
+        return send(res, 200, {ok:true});
+      }
 
-    return send(res, 405, {ok:false,error:'METHOD_NOT_ALLOWED'});
+      if (req.method === 'DELETE') {
+        const store = String(req.query?.store || '');
+        const id = String(req.query?.id || '');
+        if (!['clients','products','budgets','contracts'].includes(store) || !id) return send(res, 400, {ok:false,error:'INVALID_DELETE'});
+        if (store === 'clients') await sql`DELETE FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
+        if (store === 'products') await sql`DELETE FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
+        if (store === 'budgets') await sql`DELETE FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
+        if (store === 'contracts') await sql`DELETE FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id} AND local_id=${id}`;
+        return send(res, 200, {ok:true});
+      }
+
+      return send(res, 405, {ok:false,error:'METHOD_NOT_ALLOWED'});
+    });
   } catch (err) {
     const missing = err?.message === 'DATABASE_URL_NOT_CONFIGURED';
+    const rls = ['RLS_CONTEXT_REQUIRED','42501'].includes(err?.code) || String(err?.message || '').includes('row-level security');
     console.error(err);
-    return send(res, missing ? 503 : 500, {ok:false,error:missing?'DATABASE_NOT_CONNECTED':'SERVER_ERROR'});
+    return send(res, missing ? 503 : 500, {
+      ok:false,
+      error:missing ? 'DATABASE_NOT_CONNECTED' : (rls ? 'RLS_ACCESS_DENIED' : 'SERVER_ERROR')
+    });
   }
 };
