@@ -1,60 +1,127 @@
-const { neon } = require('@neondatabase/serverless');
+const { MongoClient } = require('mongodb');
 
-function resolveDatabaseUrl() {
+const globalCache = globalThis.__orcaMongo || (globalThis.__orcaMongo = {
+  client: null,
+  db: null,
+  uri: null,
+  dbName: null,
+  indexesReady: false,
+});
+
+function resolveMongoConfig() {
   const candidates = [
-    ['DATABASE_URL', process.env.DATABASE_URL],
-    ['POSTGRES_URL', process.env.POSTGRES_URL],
-    ['NEON_DATABASE_URL', process.env.NEON_DATABASE_URL],
-    ['NEON_POSTGRES_URL', process.env.NEON_POSTGRES_URL],
-    ['POSTGRES_PRISMA_URL', process.env.POSTGRES_PRISMA_URL]
+    ['MONGODB_URI', process.env.MONGODB_URI],
+    ['MONGODB_URL', process.env.MONGODB_URL],
+    ['MONGO_URL', process.env.MONGO_URL],
   ];
-  for (const [name, value] of candidates) {
-    if (typeof value === 'string' && /^postgres(ql)?:\/\//i.test(value)) return { url:value, source:name };
+
+  for (const [source, value] of candidates) {
+    if (typeof value === 'string' && /^mongodb(\+srv)?:\/\//i.test(value)) {
+      let dbName = process.env.MONGODB_DB || process.env.MONGO_DB || '';
+      if (!dbName) {
+        try {
+          const u = new URL(value);
+          dbName = decodeURIComponent((u.pathname || '').replace(/^\//, ''));
+        } catch (_) {}
+      }
+      return { uri: value, source, dbName: dbName || 'orcafacil' };
+    }
   }
-  const { PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT } = process.env;
-  if (PGHOST && PGDATABASE && PGUSER && PGPASSWORD) {
-    const user = encodeURIComponent(PGUSER);
-    const pass = encodeURIComponent(PGPASSWORD);
-    const db = encodeURIComponent(PGDATABASE);
-    const port = PGPORT || '5432';
-    return { url:`postgresql://${user}:${pass}@${PGHOST}:${port}/${db}?sslmode=require`, source:'PG*' };
-  }
-  return { url:null, source:null };
+
+  return { uri: null, source: null, dbName: process.env.MONGODB_DB || 'orcafacil' };
 }
 
-function getSql() {
-  const { url } = resolveDatabaseUrl();
-  if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
-  return neon(url);
+async function ensureIndexes(db) {
+  if (globalCache.indexesReady) return;
+  await Promise.all([
+    db.collection('companies').createIndex({ localId: 1 }, { unique: true }),
+    db.collection('users').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
+    db.collection('users').createIndex({ companyId: 1, pinHash: 1 }),
+    db.collection('clients').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
+    db.collection('products').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
+    db.collection('budgets').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
+    db.collection('budgets').createIndex({ companyId: 1, updatedAt: -1 }),
+    db.collection('contracts').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
+    db.collection('contracts').createIndex({ companyId: 1, updatedAt: -1 }),
+    db.collection('audit_logs').createIndex({ companyId: 1, createdAt: -1 }),
+  ]);
+  globalCache.indexesReady = true;
 }
 
-async function ensureCompany(sql) {
-  let rows = await sql`SELECT * FROM companies WHERE local_id = 'main' LIMIT 1`;
-  if (!rows.length) {
-    rows = await sql`
-      INSERT INTO companies (local_id, name)
-      VALUES ('main', 'Minha empresa')
-      RETURNING *
-    `;
+async function getDb() {
+  const cfg = resolveMongoConfig();
+  if (!cfg.uri) throw new Error('MONGODB_URI_NOT_CONFIGURED');
+
+  if (!globalCache.client || globalCache.uri !== cfg.uri) {
+    if (globalCache.client) {
+      try { await globalCache.client.close(); } catch (_) {}
+    }
+    const client = new MongoClient(cfg.uri, {
+      maxPoolSize: 10,
+      minPoolSize: 0,
+      serverSelectionTimeoutMS: 8000,
+    });
+    await client.connect();
+    globalCache.client = client;
+    globalCache.uri = cfg.uri;
+    globalCache.dbName = cfg.dbName;
+    globalCache.db = client.db(cfg.dbName);
+    globalCache.indexesReady = false;
+  } else if (!globalCache.db || globalCache.dbName !== cfg.dbName) {
+    globalCache.dbName = cfg.dbName;
+    globalCache.db = globalCache.client.db(cfg.dbName);
+    globalCache.indexesReady = false;
   }
-  return rows[0];
+
+  await ensureIndexes(globalCache.db);
+  return globalCache.db;
 }
 
-async function authenticate(sql, req) {
+async function ensureCompany(db) {
+  const companies = db.collection('companies');
+  await companies.updateOne(
+    { localId: 'main' },
+    {
+      $setOnInsert: {
+        localId: 'main',
+        name: 'Minha empresa',
+        createdAt: new Date(),
+      },
+      $set: { updatedAt: new Date() },
+    },
+    { upsert: true }
+  );
+  return companies.findOne({ localId: 'main' });
+}
+
+async function authenticate(db, req, companyId) {
   const token = String(req.headers['x-orca-auth'] || '');
   if (!token) return null;
-  const rows = await sql`
-    SELECT u.*, c.id AS resolved_company_id
-    FROM users u
-    JOIN companies c ON c.id = u.company_id
-    WHERE u.pin_hash = ${token}
-    LIMIT 1
-  `;
-  return rows[0] || null;
+  return db.collection('users').findOne({ companyId, pinHash: token });
+}
+
+async function writeAudit(db, companyId, action, entityType, localId, details = null) {
+  try {
+    await db.collection('audit_logs').insertOne({
+      companyId,
+      action,
+      entityType,
+      localId: localId || null,
+      details,
+      createdAt: new Date(),
+    });
+  } catch (_) {}
 }
 
 function send(res, status, body) {
   res.status(status).json(body);
 }
 
-module.exports = { getSql, ensureCompany, authenticate, send, resolveDatabaseUrl };
+module.exports = {
+  getDb,
+  ensureCompany,
+  authenticate,
+  writeAudit,
+  send,
+  resolveMongoConfig,
+};

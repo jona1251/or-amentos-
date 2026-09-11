@@ -1,8 +1,8 @@
 {
   "name": "orcafacil-pro",
   "private": true,
-  "version": "2.1.0",
+  "version": "3.0.0",
   "dependencies": {
-    "@neondatabase/serverless": "1.1.0"
+    "mongodb": "^6.0.0"
   }
 }
