@@ -7,9 +7,22 @@
     try{sessionStorage.removeItem(SESSION_KEY)}catch(_){}
   }
 
+  function clearServerCookie(){
+    try{
+      fetch('/api/auth',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'logout'}),
+        credentials:'same-origin',
+        keepalive:true
+      }).catch(()=>{});
+    }catch(_){}
+  }
+
   window.logout=function(){
     const lastLogin=window.auth?.login||'admin';
     clearSession();
+    clearServerCookie();
     document.body.classList.remove('mobile-menu-open');
 
     try{
@@ -34,8 +47,6 @@
     },0);
   };
 
-  // Captura o clique antes do manipulador genérico do menu, garantindo que
-  // o botão Sair nunca seja tratado como uma opção de navegação.
   document.addEventListener('click',function(e){
     const button=e.target.closest?.('.sideLogout');
     if(!button)return;
