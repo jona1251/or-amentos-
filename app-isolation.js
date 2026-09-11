@@ -52,8 +52,19 @@
     window.applyLogoUI?.();
   }
 
+  function rateMessage(seconds){
+    const s=Math.max(1,Number(seconds||1));
+    if(s>=60){const m=Math.ceil(s/60);return `Muitas tentativas. Tente novamente em ${m} minuto${m===1?'':'s'}.`}
+    return `Muitas tentativas. Tente novamente em ${s} segundo${s===1?'':'s'}.`;
+  }
+  window.formatLoginRateLimit=rateMessage;
+
   window.cloudLoginByPin=async function(pin,login='admin',silent=false){
     const normalizedLogin=String(login||'admin').trim().toLowerCase();
+    window.cloudLastLoginError=null;
+    window.cloudRetryAfter=0;
+    window.cloudAttemptsRemaining=null;
+
     if(!/^[a-z0-9._-]{3,30}$/.test(normalizedLogin)){
       if(!silent)window.toast?.('Informe um usuário válido');
       return false;
@@ -73,7 +84,12 @@
         body:JSON.stringify({action:'login',login:normalizedLogin,pinHash})
       });
       let authBody={};try{authBody=await authRes.json()}catch(_){}
-      if(!authRes.ok)throw new Error(authBody.error||('HTTP_'+authRes.status));
+      if(!authRes.ok){
+        const err=new Error(authBody.error||('HTTP_'+authRes.status));
+        err.retryAfter=Number(authBody.retryAfter||authRes.headers.get('Retry-After')||0);
+        err.attemptsRemaining=authBody.attemptsRemaining;
+        throw err;
+      }
 
       document.body.classList.add('switching-user');
       await clearActiveData();
@@ -98,11 +114,20 @@
       window.applyRoleUI?.();
       return true;
     }catch(e){
+      window.cloudLastLoginError=e.message;
+      window.cloudRetryAfter=Number(e.retryAfter||0);
+      window.cloudAttemptsRemaining=e.attemptsRemaining;
       await restoreActiveData(oldData);
       window.setAppAuth?.(oldAuth);
       if(oldAuth)await window.localPut('auth',{...oldAuth,id:'admin'});
       window.syncAdminSide?.();
-      if(!silent)window.toast?.(e.message==='INVALID_CREDENTIALS'?'Usuário ou PIN incorreto':'Não foi possível carregar os dados deste usuário');
+      if(!silent){
+        if(e.message==='RATE_LIMITED')window.toast?.(rateMessage(e.retryAfter));
+        else if(e.message==='INVALID_CREDENTIALS'){
+          const remain=Number.isFinite(Number(e.attemptsRemaining))?Number(e.attemptsRemaining):null;
+          window.toast?.(remain!=null&&remain>0?`Usuário ou PIN incorreto. Restam ${remain} tentativa${remain===1?'':'s'}.`:'Usuário ou PIN incorreto');
+        }else window.toast?.('Não foi possível carregar os dados deste usuário');
+      }
       return false;
     }finally{
       document.body.classList.remove('switching-user');
