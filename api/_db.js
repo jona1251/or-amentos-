@@ -159,6 +159,7 @@ async function ensureSchema(sql) {
       await sql`CREATE INDEX IF NOT EXISTS idx_budgets_company_created ON budgets(company_id, created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_budget_items_budget ON budget_items(budget_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_contracts_company_created ON contracts(company_id, created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_users_company_login ON users(company_id, local_id)`;
     })();
   }
   try {
@@ -179,14 +180,26 @@ async function ensureCompany(sql) {
 }
 
 async function authenticate(sql, req) {
-  const token = String(req.headers['x-orca-auth'] || '');
+  const token = String(req.headers['x-orca-auth'] || '').trim();
+  const login = String(req.headers['x-orca-user'] || '').trim().toLowerCase();
   if (!token) return null;
-  const rows = await sql`
-    SELECT u.*, c.id AS resolved_company_id
-    FROM users u JOIN companies c ON c.id = u.company_id
-    WHERE u.pin_hash = ${token}
-    LIMIT 1
-  `;
+  let rows;
+  if (login) {
+    rows = await sql`
+      SELECT u.*, c.id AS resolved_company_id
+      FROM users u JOIN companies c ON c.id = u.company_id
+      WHERE u.pin_hash = ${token} AND lower(coalesce(u.local_id,'')) = ${login}
+      LIMIT 1
+    `;
+  } else {
+    rows = await sql`
+      SELECT u.*, c.id AS resolved_company_id
+      FROM users u JOIN companies c ON c.id = u.company_id
+      WHERE u.pin_hash = ${token}
+      ORDER BY u.created_at
+      LIMIT 1
+    `;
+  }
   return rows[0] || null;
 }
 
