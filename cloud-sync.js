@@ -31,6 +31,8 @@ async function cloudRequest(url, options = {}, token, loginOverride) {
   if (!res.ok) {
     const e = new Error(body.error || ('HTTP_' + res.status));
     e.status = res.status;
+    e.retryAfter = Number(body.retryAfter || res.headers.get('Retry-After') || 0);
+    e.attemptsRemaining = body.attemptsRemaining;
     throw e;
   }
   return body;
@@ -60,12 +62,13 @@ async function cloudRegisterCurrent() {
       body: JSON.stringify({ action: 'register', name: window.auth.name || 'Administrador', login, pinHash: window.auth.pinHash })
     }, null, login);
     if (r.user) {
-      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name };
+      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name, serverId:r.user.id || window.auth.serverId || null };
       window.setAppAuth?.(next);
       await window.localPut('auth', next);
     }
     return true;
   } catch (e) {
+    window.cloudLastRegisterError = e.message;
     if (e.message === 'USER_ALREADY_EXISTS') return false;
     throw e;
   }
@@ -74,19 +77,42 @@ async function cloudRegisterCurrent() {
 async function cloudVerifyCurrent() {
   if (!window.auth?.pinHash) return false;
   const login = (window.auth.login || 'admin').toLowerCase();
+  window.cloudLastVerifyError = null;
   try {
     const r = await cloudRequest('/api/auth', {
       method: 'POST',
       body: JSON.stringify({ action: 'login', login, pinHash: window.auth.pinHash })
     }, null, login);
     if (r.user) {
-      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name };
+      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name, serverId:r.user.id || window.auth.serverId || null };
       window.setAppAuth?.(next);
       await window.localPut('auth', next);
     }
     return true;
-  } catch (_) { return false; }
+  } catch (e) {
+    window.cloudLastVerifyError = e.message;
+    window.cloudRetryAfter = Number(e.retryAfter || 0);
+    window.cloudAttemptsRemaining = e.attemptsRemaining;
+    return false;
+  }
 }
+
+function requireCloudLogin(message='Entre novamente para sincronizar com a nuvem') {
+  try { localStorage.removeItem('orcafacil_active_session_v1'); } catch (_) {}
+  const loginEl = document.getElementById('login');
+  const setup = document.getElementById('setup');
+  const enter = document.getElementById('enter');
+  const user = document.getElementById('loginUser');
+  const hello = document.getElementById('hello');
+  if (setup) setup.classList.add('hide');
+  if (enter) enter.classList.remove('hide');
+  if (user && !user.value) user.value = window.auth?.login || 'admin';
+  if (hello) hello.textContent = message;
+  if (loginEl) loginEl.classList.remove('hide');
+  window.cloudNeedsReauth = true;
+  window.refreshUserAccessUI?.();
+}
+window.requireCloudLogin = requireCloudLogin;
 
 async function cloudUploadAll() {
   if (!cloudReady || !window.auth?.pinHash) return;
@@ -130,15 +156,50 @@ async function cloudPull() {
 
 async function cloudInitialSync(existingLocalUser) {
   try {
-    let allowed = await cloudVerifyCurrent();
-    if (!allowed) allowed = await cloudRegisterCurrent();
-    if (!allowed) { cloudSetState('offline','Acesso da nuvem diferente'); return; }
+    const allowed = await cloudVerifyCurrent();
+    if (!allowed) {
+      let status = null;
+      try { status = await cloudRequest('/api/auth', { method:'GET' }, null, null); } catch (_) {}
+
+      // Só registra automaticamente quando a nuvem ainda não possui nenhum usuário.
+      // Se já há usuários, nunca sobrescreve a conta da nuvem com credenciais locais antigas.
+      if (status?.online && status.hasUser === false) {
+        const registered = await cloudRegisterCurrent();
+        if (registered) {
+          if (existingLocalUser) await cloudUploadAll();
+          await cloudPull();
+          window.cloudNeedsReauth = false;
+          window.refreshUserAccessUI?.();
+          return true;
+        }
+      }
+
+      if (status?.online) {
+        cloudReady = true;
+        cloudSetState('online','Nuvem online • autenticação necessária');
+        requireCloudLogin(
+          window.cloudLastVerifyError === 'RATE_LIMITED'
+            ? 'Seu acesso está temporariamente bloqueado. Aguarde e entre novamente.'
+            : 'Sua sessão local não corresponde à conta da nuvem. Entre novamente com seu usuário e PIN.'
+        );
+        return false;
+      }
+
+      cloudReady = false;
+      cloudSetState('offline','Modo local');
+      return false;
+    }
+
+    window.cloudNeedsReauth = false;
     if (existingLocalUser) await cloudUploadAll();
     await cloudPull();
     window.refreshUserAccessUI?.();
+    return true;
   } catch (e) {
     console.warn('Cloud sync:', e);
+    cloudReady = false;
     cloudSetState('offline', 'Modo local');
+    return false;
   }
 }
 
@@ -170,9 +231,11 @@ window.cloudLoginByPin = async function(pin, login='admin', silent=false) {
     const normalizedLogin = String(login || 'admin').trim().toLowerCase();
     const pinHash = await window.hash(pin);
     const r = await cloudRequest('/api/auth', { method:'POST', body:JSON.stringify({ action:'login', login:normalizedLogin, pinHash }) }, null, normalizedLogin);
-    const newAuth = { id:'admin', name:r.user?.name || 'Usuário', login:r.user?.login || normalizedLogin, role:r.user?.role || 'operador', pinHash };
+    const newAuth = { id:'admin', serverId:r.user?.id || null, name:r.user?.name || 'Usuário', login:r.user?.login || normalizedLogin, role:r.user?.role || 'operador', pinHash };
     window.setAppAuth?.(newAuth);
     await window.localPut('auth', newAuth);
+    window.cloudNeedsReauth = false;
+    cloudReady = true;
     document.getElementById('login')?.classList.add('hide');
     const p = document.getElementById('loginPin'); if (p) p.value='';
     if (typeof window.syncAdminSide === 'function') window.syncAdminSide();
@@ -181,7 +244,13 @@ window.cloudLoginByPin = async function(pin, login='admin', silent=false) {
     return true;
   } catch (e) {
     window.cloudLastLoginError = e.message;
-    if (!silent && typeof window.toast === 'function') window.toast(e.message === 'INVALID_CREDENTIALS' ? 'Usuário ou PIN incorreto' : 'Não foi possível entrar na nuvem');
+    window.cloudRetryAfter = Number(e.retryAfter || 0);
+    window.cloudAttemptsRemaining = e.attemptsRemaining;
+    if (!silent && typeof window.toast === 'function') {
+      if (e.message === 'INVALID_CREDENTIALS') window.toast('Usuário ou PIN incorreto');
+      else if (e.message === 'RATE_LIMITED') window.toast('Muitas tentativas. Aguarde antes de tentar novamente.');
+      else window.toast('Não foi possível entrar na nuvem');
+    }
     return false;
   }
 };
@@ -191,7 +260,7 @@ window.cloudAfterLogin = function() {
 };
 
 window.cloudAfterPut = function(store, record) {
-  if (cloudSyncing || !cloudReady || !window.auth?.pinHash || store === 'auth') return;
+  if (cloudSyncing || !cloudReady || window.cloudNeedsReauth || !window.auth?.pinHash || store === 'auth') return;
   cloudQueue = cloudQueue.then(async () => {
     cloudSetState('sync','Sincronizando...');
     await cloudRequest('/api/data', { method:'POST', body:JSON.stringify({ store, record }) });
@@ -200,7 +269,7 @@ window.cloudAfterPut = function(store, record) {
 };
 
 window.cloudAfterDelete = function(store, id) {
-  if (cloudSyncing || !cloudReady || !window.auth?.pinHash || !['clients','products','budgets','contracts'].includes(store)) return;
+  if (cloudSyncing || !cloudReady || window.cloudNeedsReauth || !window.auth?.pinHash || !['clients','products','budgets','contracts'].includes(store)) return;
   cloudQueue = cloudQueue.then(async () => {
     cloudSetState('sync','Sincronizando...');
     await cloudRequest('/api/data?store='+encodeURIComponent(store)+'&id='+encodeURIComponent(id), { method:'DELETE' });
