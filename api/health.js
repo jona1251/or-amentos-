@@ -1,4 +1,4 @@
-const { getSql, ensureSchema, resolveDatabaseUrl, send } = require('./_db');
+const { getSql, ensureSchema, getRlsStatus, resolveDatabaseUrl, send } = require('./_db');
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'GET') return send(res, 405, { ok:false, error:'METHOD_NOT_ALLOWED' });
@@ -9,6 +9,7 @@ module.exports = async function handler(req, res) {
     await ensureSchema(sql);
     const rows = await sql`SELECT current_database() AS database_name, current_user AS role_name, now() AS server_time`;
     const tables = await sql`SELECT count(*)::int AS total FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('companies','users','user_settings','clients','products','budgets','budget_items','contracts','audit_log')`;
+    const rls = await getRlsStatus(sql);
     return send(res, 200, {
       ok:true,
       configured:true,
@@ -18,11 +19,20 @@ module.exports = async function handler(req, res) {
       role:rows[0]?.role_name || null,
       schemaReady:Number(tables[0]?.total || 0) === 9,
       userIsolation:true,
+      rlsReady:rls.ready,
+      rls,
       tables:Number(tables[0]?.total || 0),
       serverTime:rows[0]?.server_time || null
     });
   } catch (err) {
     console.error('health', err);
-    return send(res, 500, { ok:false, configured:true, provider:'postgres', source:cfg.source, error:'DATABASE_CONNECTION_FAILED' });
+    return send(res, 500, {
+      ok:false,
+      configured:true,
+      provider:'postgres',
+      source:cfg.source,
+      error:'DATABASE_CONNECTION_FAILED',
+      detail:String(err?.message || '').slice(0,160)
+    });
   }
 };
