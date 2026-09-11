@@ -1,5 +1,12 @@
 const { getSql, ensureCompany, send } = require('./_db');
 const { issueSession, getSessionUser, clearSession } = require('./_session');
+const { checkLoginRateLimit, recordFailedLogin, clearSuccessfulLogin } = require('./_rate_limit');
+
+function setRetryAfter(res, seconds) {
+  const value = Math.max(1, Number(seconds || 1));
+  res.setHeader('Retry-After', String(value));
+  return value;
+}
 
 module.exports = async function handler(req, res) {
   try {
@@ -60,13 +67,43 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'login') {
+      const currentLimit = await checkLoginRateLimit(sql, company.id, login, req);
+      if (currentLimit.limited) {
+        const retryAfter = setRetryAfter(res, currentLimit.retryAfter);
+        return send(res, 429, {
+          ok: false,
+          error: 'RATE_LIMITED',
+          retryAfter,
+          scope: currentLimit.scope
+        });
+      }
+
       const rows = await sql`
         SELECT id, name, local_id, role FROM users
         WHERE company_id = ${company.id} AND lower(coalesce(local_id,'')) = ${login} AND pin_hash = ${pinHash}
         LIMIT 1
       `;
-      if (!rows.length) return send(res, 401, { ok: false, error: 'INVALID_CREDENTIALS' });
+
+      if (!rows.length) {
+        const failure = await recordFailedLogin(sql, company.id, login, req);
+        if (failure.limited) {
+          const retryAfter = setRetryAfter(res, failure.retryAfter);
+          return send(res, 429, {
+            ok: false,
+            error: 'RATE_LIMITED',
+            retryAfter,
+            scope: failure.scope
+          });
+        }
+        return send(res, 401, {
+          ok: false,
+          error: 'INVALID_CREDENTIALS',
+          attemptsRemaining: failure.attemptsRemaining
+        });
+      }
+
       const user = rows[0];
+      await clearSuccessfulLogin(sql, company.id, login, req);
       await issueSession(sql, res, company.id, user.id);
       return send(res, 200, { ok: true, user: { id:user.id, name:user.name, login:user.local_id, role:user.role } });
     }
