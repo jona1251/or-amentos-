@@ -105,6 +105,7 @@
       await window.localPut('auth',newAuth);
       await pullForCurrentUser();
 
+      window.cloudNeedsReauth=false;
       const loginEl=document.getElementById('login');
       if(loginEl)loginEl.classList.add('hide');
       const pinEl=document.getElementById('loginPin');if(pinEl)pinEl.value='';
@@ -112,6 +113,7 @@
       window.syncAdminSide?.();
       window.refreshUserAccessUI?.();
       window.applyRoleUI?.();
+      window.setOrcaConnectionState?.('online','🟢 Online');
       return true;
     }catch(e){
       window.cloudLastLoginError=e.message;
