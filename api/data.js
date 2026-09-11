@@ -1,4 +1,4 @@
-const { getSql, ensureCompany, ensureLegacyOwnership, authenticate, withRlsSql, send } = require('./_db');
+const { getSql, ensureCompany, authenticate, withRlsSql, send } = require('./_db');
 
 const toNum = v => Number(v || 0);
 const iso = v => v ? new Date(v) : new Date();
@@ -175,8 +175,6 @@ module.exports = async function handler(req, res) {
     const company = await ensureCompany(adminSql);
     const user = await authenticate(adminSql, req);
     if (!user) return send(res, 401, { ok:false, error:'UNAUTHORIZED' });
-
-    await ensureLegacyOwnership(adminSql, company.id);
 
     return await withRlsSql(company.id, user, async sql => {
       if (req.method === 'GET') return send(res, 200, { ok:true, data:await snapshot(sql, company.id, user.id) });
