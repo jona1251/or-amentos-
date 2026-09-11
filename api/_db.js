@@ -1,127 +1,195 @@
-const { MongoClient } = require('mongodb');
+const { neon } = require('@neondatabase/serverless');
 
-const globalCache = globalThis.__orcaMongo || (globalThis.__orcaMongo = {
-  client: null,
-  db: null,
-  uri: null,
-  dbName: null,
-  indexesReady: false,
-});
+let schemaPromise = null;
 
-function resolveMongoConfig() {
+function resolveDatabaseUrl() {
   const candidates = [
-    ['MONGODB_URI', process.env.MONGODB_URI],
-    ['MONGODB_URL', process.env.MONGODB_URL],
-    ['MONGO_URL', process.env.MONGO_URL],
+    ['DATABASE_URL', process.env.DATABASE_URL],
+    ['POSTGRES_URL', process.env.POSTGRES_URL],
+    ['NEON_DATABASE_URL', process.env.NEON_DATABASE_URL],
+    ['NEON_POSTGRES_URL', process.env.NEON_POSTGRES_URL],
+    ['POSTGRES_PRISMA_URL', process.env.POSTGRES_PRISMA_URL]
   ];
-
-  for (const [source, value] of candidates) {
-    if (typeof value === 'string' && /^mongodb(\+srv)?:\/\//i.test(value)) {
-      let dbName = process.env.MONGODB_DB || process.env.MONGO_DB || '';
-      if (!dbName) {
-        try {
-          const u = new URL(value);
-          dbName = decodeURIComponent((u.pathname || '').replace(/^\//, ''));
-        } catch (_) {}
-      }
-      return { uri: value, source, dbName: dbName || 'orcafacil' };
-    }
+  for (const [name, value] of candidates) {
+    if (typeof value === 'string' && /^postgres(ql)?:\/\//i.test(value)) return { url: value, source: name };
   }
-
-  return { uri: null, source: null, dbName: process.env.MONGODB_DB || 'orcafacil' };
-}
-
-async function ensureIndexes(db) {
-  if (globalCache.indexesReady) return;
-  await Promise.all([
-    db.collection('companies').createIndex({ localId: 1 }, { unique: true }),
-    db.collection('users').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
-    db.collection('users').createIndex({ companyId: 1, pinHash: 1 }),
-    db.collection('clients').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
-    db.collection('products').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
-    db.collection('budgets').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
-    db.collection('budgets').createIndex({ companyId: 1, updatedAt: -1 }),
-    db.collection('contracts').createIndex({ companyId: 1, localId: 1 }, { unique: true }),
-    db.collection('contracts').createIndex({ companyId: 1, updatedAt: -1 }),
-    db.collection('audit_logs').createIndex({ companyId: 1, createdAt: -1 }),
-  ]);
-  globalCache.indexesReady = true;
-}
-
-async function getDb() {
-  const cfg = resolveMongoConfig();
-  if (!cfg.uri) throw new Error('MONGODB_URI_NOT_CONFIGURED');
-
-  if (!globalCache.client || globalCache.uri !== cfg.uri) {
-    if (globalCache.client) {
-      try { await globalCache.client.close(); } catch (_) {}
-    }
-    const client = new MongoClient(cfg.uri, {
-      maxPoolSize: 10,
-      minPoolSize: 0,
-      serverSelectionTimeoutMS: 8000,
-    });
-    await client.connect();
-    globalCache.client = client;
-    globalCache.uri = cfg.uri;
-    globalCache.dbName = cfg.dbName;
-    globalCache.db = client.db(cfg.dbName);
-    globalCache.indexesReady = false;
-  } else if (!globalCache.db || globalCache.dbName !== cfg.dbName) {
-    globalCache.dbName = cfg.dbName;
-    globalCache.db = globalCache.client.db(cfg.dbName);
-    globalCache.indexesReady = false;
+  const { PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT } = process.env;
+  if (PGHOST && PGDATABASE && PGUSER && PGPASSWORD) {
+    return {
+      url: `postgresql://${encodeURIComponent(PGUSER)}:${encodeURIComponent(PGPASSWORD)}@${PGHOST}:${PGPORT || '5432'}/${encodeURIComponent(PGDATABASE)}?sslmode=require`,
+      source: 'PG*'
+    };
   }
-
-  await ensureIndexes(globalCache.db);
-  return globalCache.db;
+  return { url: null, source: null };
 }
 
-async function ensureCompany(db) {
-  const companies = db.collection('companies');
-  await companies.updateOne(
-    { localId: 'main' },
-    {
-      $setOnInsert: {
-        localId: 'main',
-        name: 'Minha empresa',
-        createdAt: new Date(),
-      },
-      $set: { updatedAt: new Date() },
-    },
-    { upsert: true }
-  );
-  return companies.findOne({ localId: 'main' });
+function getSql() {
+  const { url } = resolveDatabaseUrl();
+  if (!url) throw new Error('DATABASE_URL_NOT_CONFIGURED');
+  return neon(url);
 }
 
-async function authenticate(db, req, companyId) {
+async function ensureSchema(sql) {
+  if (!schemaPromise) {
+    schemaPromise = (async () => {
+      await sql`CREATE TABLE IF NOT EXISTS companies (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        local_id text UNIQUE,
+        name text NOT NULL DEFAULT 'Minha empresa',
+        document text,
+        owner_name text,
+        phone text,
+        email text,
+        address text,
+        city text,
+        pix_key text,
+        logo_url text,
+        slogan text,
+        budget_prefix text NOT NULL DEFAULT 'ORC',
+        budget_seq integer NOT NULL DEFAULT 1,
+        contract_prefix text NOT NULL DEFAULT 'CTR',
+        contract_seq integer NOT NULL DEFAULT 1,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS users (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id uuid REFERENCES companies(id) ON DELETE CASCADE,
+        local_id text,
+        name text NOT NULL,
+        email text,
+        pin_hash text,
+        role text NOT NULL DEFAULT 'admin',
+        created_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(company_id, local_id)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS clients (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        local_id text NOT NULL,
+        name text NOT NULL,
+        document text,
+        phone text,
+        email text,
+        address text,
+        notes text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(company_id, local_id)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS products (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        local_id text NOT NULL,
+        type text NOT NULL DEFAULT 'Produto',
+        name text NOT NULL,
+        code text,
+        category text,
+        unit text NOT NULL DEFAULT 'un',
+        sale_price numeric(12,2) NOT NULL DEFAULT 0,
+        cost_price numeric(12,2),
+        stock numeric(12,3),
+        description text,
+        active boolean NOT NULL DEFAULT true,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(company_id, local_id)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS budgets (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        local_id text NOT NULL,
+        client_id uuid NOT NULL REFERENCES clients(id),
+        number text NOT NULL,
+        status text NOT NULL DEFAULT 'Rascunho',
+        valid_days integer NOT NULL DEFAULT 10,
+        payment_method text,
+        deadline text,
+        warranty text,
+        execution_location text,
+        notes text,
+        subtotal numeric(12,2) NOT NULL DEFAULT 0,
+        discount numeric(12,2) NOT NULL DEFAULT 0,
+        total numeric(12,2) NOT NULL DEFAULT 0,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(company_id, local_id),
+        UNIQUE(company_id, number)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS budget_items (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        budget_id uuid NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
+        local_id text,
+        product_id uuid REFERENCES products(id) ON DELETE SET NULL,
+        description text NOT NULL,
+        quantity numeric(12,3) NOT NULL DEFAULT 1,
+        unit_price numeric(12,2) NOT NULL DEFAULT 0,
+        total numeric(12,2) GENERATED ALWAYS AS (quantity * unit_price) STORED
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS contracts (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        local_id text NOT NULL,
+        budget_id uuid NOT NULL REFERENCES budgets(id),
+        client_id uuid NOT NULL REFERENCES clients(id),
+        number text NOT NULL,
+        contract_type text NOT NULL DEFAULT 'Prestação de Serviços',
+        forum_city text,
+        contract_term text,
+        additional_clauses text,
+        status text NOT NULL DEFAULT 'Rascunho',
+        signed_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(company_id, local_id),
+        UNIQUE(company_id, number)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS audit_log (
+        id bigserial PRIMARY KEY,
+        company_id uuid REFERENCES companies(id) ON DELETE CASCADE,
+        user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+        entity_type text NOT NULL,
+        entity_id uuid,
+        action text NOT NULL,
+        details jsonb,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_clients_company ON clients(company_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_products_company ON products(company_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_budgets_company_created ON budgets(company_id, created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_budget_items_budget ON budget_items(budget_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_contracts_company_created ON contracts(company_id, created_at DESC)`;
+    })();
+  }
+  try {
+    await schemaPromise;
+  } catch (err) {
+    schemaPromise = null;
+    throw err;
+  }
+}
+
+async function ensureCompany(sql) {
+  await ensureSchema(sql);
+  let rows = await sql`SELECT * FROM companies WHERE local_id = 'main' LIMIT 1`;
+  if (!rows.length) {
+    rows = await sql`INSERT INTO companies (local_id, name) VALUES ('main', 'Minha empresa') RETURNING *`;
+  }
+  return rows[0];
+}
+
+async function authenticate(sql, req) {
   const token = String(req.headers['x-orca-auth'] || '');
   if (!token) return null;
-  return db.collection('users').findOne({ companyId, pinHash: token });
+  const rows = await sql`
+    SELECT u.*, c.id AS resolved_company_id
+    FROM users u JOIN companies c ON c.id = u.company_id
+    WHERE u.pin_hash = ${token}
+    LIMIT 1
+  `;
+  return rows[0] || null;
 }
 
-async function writeAudit(db, companyId, action, entityType, localId, details = null) {
-  try {
-    await db.collection('audit_logs').insertOne({
-      companyId,
-      action,
-      entityType,
-      localId: localId || null,
-      details,
-      createdAt: new Date(),
-    });
-  } catch (_) {}
-}
+function send(res, status, body) { res.status(status).json(body); }
 
-function send(res, status, body) {
-  res.status(status).json(body);
-}
-
-module.exports = {
-  getDb,
-  ensureCompany,
-  authenticate,
-  writeAudit,
-  send,
-  resolveMongoConfig,
-};
+module.exports = { getSql, ensureSchema, ensureCompany, authenticate, send, resolveDatabaseUrl };
