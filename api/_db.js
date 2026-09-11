@@ -63,9 +63,30 @@ async function ensureSchema(sql) {
         created_at timestamptz NOT NULL DEFAULT now(),
         UNIQUE(company_id, local_id)
       )`;
+      await sql`CREATE TABLE IF NOT EXISTS user_settings (
+        company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        company_name text NOT NULL DEFAULT 'Minha empresa',
+        company_document text,
+        company_owner text,
+        company_phone text,
+        company_email text,
+        company_address text,
+        company_city text,
+        pix_key text,
+        logo_url text,
+        slogan text,
+        budget_prefix text NOT NULL DEFAULT 'ORC',
+        budget_seq integer NOT NULL DEFAULT 1,
+        contract_prefix text NOT NULL DEFAULT 'CTR',
+        contract_seq integer NOT NULL DEFAULT 1,
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY(company_id, user_id)
+      )`;
       await sql`CREATE TABLE IF NOT EXISTS clients (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
         local_id text NOT NULL,
         name text NOT NULL,
         document text,
@@ -80,6 +101,7 @@ async function ensureSchema(sql) {
       await sql`CREATE TABLE IF NOT EXISTS products (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
         local_id text NOT NULL,
         type text NOT NULL DEFAULT 'Produto',
         name text NOT NULL,
@@ -98,6 +120,7 @@ async function ensureSchema(sql) {
       await sql`CREATE TABLE IF NOT EXISTS budgets (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
         local_id text NOT NULL,
         client_id uuid NOT NULL REFERENCES clients(id),
         number text NOT NULL,
@@ -113,8 +136,7 @@ async function ensureSchema(sql) {
         total numeric(12,2) NOT NULL DEFAULT 0,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now(),
-        UNIQUE(company_id, local_id),
-        UNIQUE(company_id, number)
+        UNIQUE(company_id, local_id)
       )`;
       await sql`CREATE TABLE IF NOT EXISTS budget_items (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -129,6 +151,7 @@ async function ensureSchema(sql) {
       await sql`CREATE TABLE IF NOT EXISTS contracts (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
         local_id text NOT NULL,
         budget_id uuid NOT NULL REFERENCES budgets(id),
         client_id uuid NOT NULL REFERENCES clients(id),
@@ -141,8 +164,7 @@ async function ensureSchema(sql) {
         signed_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now(),
-        UNIQUE(company_id, local_id),
-        UNIQUE(company_id, number)
+        UNIQUE(company_id, local_id)
       )`;
       await sql`CREATE TABLE IF NOT EXISTS audit_log (
         id bigserial PRIMARY KEY,
@@ -154,12 +176,27 @@ async function ensureSchema(sql) {
         details jsonb,
         created_at timestamptz NOT NULL DEFAULT now()
       )`;
+
+      await sql`ALTER TABLE clients ADD COLUMN IF NOT EXISTS owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE`;
+      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE`;
+      await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE`;
+      await sql`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS owner_user_id uuid REFERENCES users(id) ON DELETE CASCADE`;
+
+      await sql`ALTER TABLE budgets DROP CONSTRAINT IF EXISTS budgets_company_id_number_key`;
+      await sql`ALTER TABLE contracts DROP CONSTRAINT IF EXISTS contracts_company_id_number_key`;
+
       await sql`CREATE INDEX IF NOT EXISTS idx_clients_company ON clients(company_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_products_company ON products(company_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_budgets_company_created ON budgets(company_id, created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_budget_items_budget ON budget_items(budget_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_contracts_company_created ON contracts(company_id, created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_users_company_login ON users(company_id, local_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_clients_owner ON clients(company_id, owner_user_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_products_owner ON products(company_id, owner_user_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_budgets_owner ON budgets(company_id, owner_user_id, updated_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_contracts_owner ON contracts(company_id, owner_user_id, updated_at DESC)`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_user_number ON budgets(company_id, owner_user_id, number) WHERE owner_user_id IS NOT NULL`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_contracts_user_number ON contracts(company_id, owner_user_id, number) WHERE owner_user_id IS NOT NULL`;
     })();
   }
   try {
@@ -173,10 +210,28 @@ async function ensureSchema(sql) {
 async function ensureCompany(sql) {
   await ensureSchema(sql);
   let rows = await sql`SELECT * FROM companies WHERE local_id = 'main' LIMIT 1`;
-  if (!rows.length) {
-    rows = await sql`INSERT INTO companies (local_id, name) VALUES ('main', 'Minha empresa') RETURNING *`;
-  }
+  if (!rows.length) rows = await sql`INSERT INTO companies (local_id, name) VALUES ('main', 'Minha empresa') RETURNING *`;
   return rows[0];
+}
+
+async function ensureLegacyOwnership(sql, companyId) {
+  const first = await sql`SELECT id FROM users WHERE company_id=${companyId} ORDER BY created_at ASC LIMIT 1`;
+  const ownerId = first[0]?.id;
+  if (!ownerId) return null;
+  await sql`UPDATE clients SET owner_user_id=${ownerId} WHERE company_id=${companyId} AND owner_user_id IS NULL`;
+  await sql`UPDATE products SET owner_user_id=${ownerId} WHERE company_id=${companyId} AND owner_user_id IS NULL`;
+  await sql`UPDATE budgets SET owner_user_id=${ownerId} WHERE company_id=${companyId} AND owner_user_id IS NULL`;
+  await sql`UPDATE contracts SET owner_user_id=${ownerId} WHERE company_id=${companyId} AND owner_user_id IS NULL`;
+  await sql`
+    INSERT INTO user_settings (
+      company_id,user_id,company_name,company_document,company_owner,company_phone,company_email,company_address,company_city,
+      pix_key,logo_url,slogan,budget_prefix,budget_seq,contract_prefix,contract_seq
+    )
+    SELECT id,${ownerId},name,document,owner_name,phone,email,address,city,pix_key,logo_url,slogan,budget_prefix,budget_seq,contract_prefix,contract_seq
+    FROM companies WHERE id=${companyId}
+    ON CONFLICT (company_id,user_id) DO NOTHING
+  `;
+  return ownerId;
 }
 
 async function authenticate(sql, req) {
@@ -205,4 +260,4 @@ async function authenticate(sql, req) {
 
 function send(res, status, body) { res.status(status).json(body); }
 
-module.exports = { getSql, ensureSchema, ensureCompany, authenticate, send, resolveDatabaseUrl };
+module.exports = { getSql, ensureSchema, ensureCompany, ensureLegacyOwnership, authenticate, send, resolveDatabaseUrl };
