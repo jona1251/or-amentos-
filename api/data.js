@@ -177,7 +177,6 @@ module.exports = async function handler(req, res) {
     if (!user) return send(res, 401, { ok:false, error:'UNAUTHORIZED' });
 
     await ensureLegacyOwnership(adminSql, company.id);
-    await ensureUserSettings(adminSql, company.id, user.id);
 
     return await withRlsSql(company.id, user, async sql => {
       if (req.method === 'GET') return send(res, 200, { ok:true, data:await snapshot(sql, company.id, user.id) });
