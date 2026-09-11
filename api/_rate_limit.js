@@ -17,10 +17,19 @@ function getClientIp(req) {
   return forwarded || real || 'unknown';
 }
 
+function accountRateKey(companyId, login) {
+  return `acct:${hashKey(`${companyId}:${String(login || '').toLowerCase()}`)}`;
+}
+
+function ipRateKey(companyId, ip) {
+  return `ip:${hashKey(`${companyId}:${String(ip || 'unknown')}`)}`;
+}
+
 function rateKeys(companyId, login, req) {
-  const account = `acct:${hashKey(`${companyId}:${String(login || '').toLowerCase()}`)}`;
-  const ip = `ip:${hashKey(`${companyId}:${getClientIp(req)}`)}`;
-  return { account, ip };
+  return {
+    account: accountRateKey(companyId, login),
+    ip: ipRateKey(companyId, getClientIp(req))
+  };
 }
 
 async function ensureRateLimitTable(sql) {
@@ -119,7 +128,6 @@ async function clearSuccessfulLogin(sql, companyId, login, req) {
   await ensureRateLimitTable(sql);
   const { account } = rateKeys(companyId, login, req);
   await sql`DELETE FROM login_rate_limits WHERE company_id=${companyId} AND rate_key=${account}`;
-  // Limpeza oportunista para impedir crescimento indefinido da tabela.
   await sql`DELETE FROM login_rate_limits WHERE updated_at < now() - interval '7 days'`;
 }
 
@@ -127,7 +135,12 @@ module.exports = {
   checkLoginRateLimit,
   recordFailedLogin,
   clearSuccessfulLogin,
+  ensureRateLimitTable,
+  accountRateKey,
+  ipRateKey,
+  retrySeconds,
   ACCOUNT_MAX_ATTEMPTS,
+  IP_MAX_ATTEMPTS,
   WINDOW_SECONDS,
   BLOCK_SECONDS
 };
