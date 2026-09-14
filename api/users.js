@@ -1,5 +1,5 @@
 const { getSql, ensureCompany, authenticate, send } = require('./_db');
-const { DEFAULTS, ensurePermissionsTable, requirePermission, getPrimaryAdmin } = require('../lib/permissions');
+const { DEFAULTS, allAccess, ensurePermissionsTable, requirePermission, getPrimaryAdmin } = require('../lib/permissions');
 
 const cleanLogin = value => String(value || '').trim().toLowerCase();
 const validPinHash = value => /^[a-f0-9]{64}$/i.test(String(value || ''));
@@ -14,7 +14,6 @@ const PRESETS = {
   leitura:{dashboard:true,clientes:true,produtos:true,orcamentos:true,contratos:true,financeiro:true,operacoes:true,crm:true,relatorios:true,custos:false,configuracoes:false,excluir:false,usuarios:false,seguranca:false}
 };
 
-const allAccess = () => Object.fromEntries(Object.keys(DEFAULTS).map(k => [k,true]));
 const sanitizePermissions = input => Object.fromEntries(Object.keys(DEFAULTS).map(k => [k,input?.[k] !== false]));
 
 module.exports = async function handler(req, res) {
@@ -30,7 +29,6 @@ module.exports = async function handler(req, res) {
     const isPrimary = String(current.id) === String(primaryAdminId);
 
     if (String(req.query?.action || '') === 'access_control') {
-      if (!isPrimary) return send(res, 403, {ok:false,error:'PRIMARY_ADMIN_ONLY'});
       await ensurePermissionsTable(sql);
 
       if (req.method === 'GET') {
@@ -49,7 +47,8 @@ module.exports = async function handler(req, res) {
           users:rows.map(u=>({
             id:u.id,login:u.local_id,name:u.name,email:u.email||'',role:u.role,createdAt:u.created_at,
             primaryAdmin:String(u.id)===String(primaryAdminId),
-            permissions:String(u.id)===String(primaryAdminId)?allAccess():{...DEFAULTS,...(u.permissions||{})}
+            adminFull:u.role==='admin',
+            permissions:u.role==='admin'?allAccess():{...DEFAULTS,...(u.permissions||{})}
           }))
         });
       }
@@ -58,7 +57,7 @@ module.exports = async function handler(req, res) {
         const userId=String(req.body?.userId||'');
         const target=await sql`SELECT id,role,name,local_id FROM users WHERE company_id=${company.id} AND id::text=${userId} LIMIT 1`;
         if(!target.length)return send(res,404,{ok:false,error:'USER_NOT_FOUND'});
-        if(String(userId)===String(primaryAdminId))return send(res,400,{ok:false,error:'PRIMARY_ADMIN_ALWAYS_FULL_ACCESS'});
+        if(target[0].role==='admin')return send(res,400,{ok:false,error:'ADMIN_ALWAYS_FULL_ACCESS'});
         const mode=String(req.body?.mode||'save');
         let permissions;
         if(mode==='preset'){
@@ -92,7 +91,7 @@ module.exports = async function handler(req, res) {
       `;
       return send(res, 200, {
         ok:true,
-        users:rows.map(u=>({id:u.id, login:u.local_id, name:u.name, email:u.email || '', role:u.role, createdAt:u.created_at, primaryAdmin:String(u.id)===String(primaryAdminId)})),
+        users:rows.map(u=>({id:u.id, login:u.local_id, name:u.name, email:u.email || '', role:u.role, createdAt:u.created_at, primaryAdmin:String(u.id)===String(primaryAdminId), adminFull:u.role==='admin'})),
         currentUserId:current.id,
         primaryAdminId
       });
@@ -116,7 +115,7 @@ module.exports = async function handler(req, res) {
         RETURNING id, local_id, name, email, role, created_at
       `;
       const u = rows[0];
-      return send(res, 201, { ok:true, user:{id:u.id,login:u.local_id,name:u.name,email:u.email||'',role:u.role,createdAt:u.created_at} });
+      return send(res, 201, { ok:true, user:{id:u.id,login:u.local_id,name:u.name,email:u.email||'',role:u.role,createdAt:u.created_at,adminFull:u.role==='admin'} });
     }
 
     if (req.method === 'PATCH') {
@@ -158,8 +157,12 @@ module.exports = async function handler(req, res) {
         WHERE company_id=${company.id} AND id=${target.id}
         RETURNING id, local_id, name, email, role, created_at
       `;
+      if (String(target.role) !== String(role)) {
+        await ensurePermissionsTable(sql);
+        await sql`DELETE FROM user_permissions WHERE company_id=${company.id} AND user_id=${target.id}`;
+      }
       const u = rows[0];
-      return send(res, 200, {ok:true,user:{id:u.id,login:u.local_id,name:u.name,email:u.email||'',role:u.role,createdAt:u.created_at},currentUser:String(current.id)===String(u.id)});
+      return send(res, 200, {ok:true,user:{id:u.id,login:u.local_id,name:u.name,email:u.email||'',role:u.role,createdAt:u.created_at,adminFull:u.role==='admin'},currentUser:String(current.id)===String(u.id)});
     }
 
     if (req.method === 'DELETE') {
