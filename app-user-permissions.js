@@ -21,7 +21,7 @@
   let accessData=null;
 
   async function req(options={}){
-    const r=await fetch('/api/access-control',{...options,headers:{...headers(),...(options.headers||{})},cache:'no-store'});
+    const r=await fetch('/api/users?action=access_control',{...options,headers:{...headers(),...(options.headers||{})},cache:'no-store'});
     let b={};try{b=await r.json()}catch(_){}
     if(!r.ok){const e=new Error(b.error||('HTTP_'+r.status));e.status=r.status;throw e}return b;
   }
@@ -58,7 +58,7 @@
   window.updateAccessCounter=id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const n=boxes.filter(x=>x.checked).length,el=$('accessCount_'+id);if(el){el.textContent=`${n}/${MODULES.length} módulos`;el.classList.toggle('full',n===MODULES.length)}};
   window.setAllAccess=(id,on)=>{document.querySelectorAll(`[data-access-user-id="${id}"]`).forEach(x=>x.checked=!!on);window.updateAccessCounter(id)};
   window.applyAccessPreset=id=>{const preset=$('accessPreset_'+id)?.value;if(!preset)return;const p=accessData?.presets?.[preset];if(!p)return;document.querySelectorAll(`[data-access-user-id="${id}"]`).forEach(x=>x.checked=p[x.dataset.accessPerm]!==false);window.updateAccessCounter(id)};
-  window.saveUserAccess=async id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const permissions={};boxes.forEach(x=>permissions[x.dataset.accessPerm]=x.checked);try{await req({method:'POST',body:JSON.stringify({action:'save',userId:id,permissions})});window.toast?.('Permissões atualizadas');await load()}catch(e){window.toast?.('Não foi possível salvar as permissões')}};
+  window.saveUserAccess=async id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const permissions={};boxes.forEach(x=>permissions[x.dataset.accessPerm]=x.checked);try{await req({method:'POST',body:JSON.stringify({mode:'save',userId:id,permissions})});window.toast?.('Permissões atualizadas');await load()}catch(e){window.toast?.('Não foi possível salvar as permissões')}};
 
   const oldLoad=window.loadUsers;window.loadUsers=async function(...args){const r=typeof oldLoad==='function'?await oldLoad.apply(this,args):undefined;setTimeout(load,100);return r};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(install,900));else setTimeout(install,900);
