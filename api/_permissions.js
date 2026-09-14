@@ -9,6 +9,7 @@ const DEFAULTS = {
   crm:true,
   relatorios:true,
   custos:true,
+  configuracoes:true,
   excluir:true,
   usuarios:false,
   seguranca:false
@@ -49,12 +50,7 @@ async function getUserPermissions(sql, companyId, user) {
   `;
   const saved = rows[0]?.permissions || {};
   const permissions = {...DEFAULTS, ...saved};
-  if (user?.role === 'admin') {
-    // Admin secundário continua podendo usar o sistema, mas o admin principal
-    // pode retirar módulos individualmente. Gerenciar usuários e segurança
-    // não é liberado automaticamente.
-    permissions.dashboard = saved.dashboard !== false;
-  }
+  if (user?.role === 'admin') permissions.dashboard = saved.dashboard !== false;
   return { permissions, primary:false };
 }
 
