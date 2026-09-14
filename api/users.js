@@ -1,4 +1,5 @@
 const { getSql, ensureCompany, authenticate, send } = require('./_db');
+const { requirePermission, getPrimaryAdmin } = require('./_permissions');
 
 const cleanLogin = value => String(value || '').trim().toLowerCase();
 const validPinHash = value => /^[a-f0-9]{64}$/i.test(String(value || ''));
@@ -12,6 +13,7 @@ module.exports = async function handler(req, res) {
     const current = await authenticate(sql, req);
     if (!current) return send(res, 401, { ok:false, error:'UNAUTHORIZED' });
     if (current.role !== 'admin') return send(res, 403, { ok:false, error:'ADMIN_ONLY' });
+    await requirePermission(sql, company.id, current, 'usuarios');
 
     if (req.method === 'GET') {
       const rows = await sql`
@@ -19,10 +21,12 @@ module.exports = async function handler(req, res) {
         FROM users WHERE company_id = ${company.id}
         ORDER BY created_at ASC
       `;
+      const primaryAdminId = await getPrimaryAdmin(sql, company.id);
       return send(res, 200, {
         ok:true,
-        users:rows.map(u=>({id:u.id, login:u.local_id, name:u.name, email:u.email || '', role:u.role, createdAt:u.created_at})),
-        currentUserId:current.id
+        users:rows.map(u=>({id:u.id, login:u.local_id, name:u.name, email:u.email || '', role:u.role, createdAt:u.created_at, primaryAdmin:String(u.id)===String(primaryAdminId)})),
+        currentUserId:current.id,
+        primaryAdminId
       });
     }
 
@@ -57,6 +61,10 @@ module.exports = async function handler(req, res) {
       `;
       if (!targetRows.length) return send(res, 404, { ok:false, error:'USER_NOT_FOUND' });
       const target = targetRows[0];
+      const primaryAdminId = await getPrimaryAdmin(sql, company.id);
+      if (String(target.id) === String(primaryAdminId) && String(current.id) !== String(primaryAdminId)) {
+        return send(res, 403, { ok:false, error:'PRIMARY_ADMIN_PROTECTED' });
+      }
 
       const name = req.body?.name === undefined ? target.name : String(req.body.name || '').trim();
       const login = req.body?.login === undefined ? String(target.local_id || '').toLowerCase() : cleanLogin(req.body.login);
@@ -101,6 +109,8 @@ module.exports = async function handler(req, res) {
       const id = String(req.query?.id || '');
       if (!id) return send(res, 400, { ok:false, error:'USER_ID_REQUIRED' });
       if (String(current.id) === id) return send(res, 400, { ok:false, error:'CANNOT_DELETE_SELF' });
+      const primaryAdminId = await getPrimaryAdmin(sql, company.id);
+      if (String(primaryAdminId) === id) return send(res, 403, { ok:false, error:'PRIMARY_ADMIN_PROTECTED' });
       const target = await sql`SELECT id, role FROM users WHERE company_id=${company.id} AND id::text=${id} LIMIT 1`;
       if (!target.length) return send(res, 404, { ok:false, error:'USER_NOT_FOUND' });
       if (target[0].role === 'admin') {
@@ -115,6 +125,7 @@ module.exports = async function handler(req, res) {
   } catch (err) {
     console.error(err);
     const missing = err?.message === 'DATABASE_URL_NOT_CONFIGURED';
+    if (err?.message === 'ACCESS_DENIED' || err?.code === 'ACCESS_DENIED') return send(res, 403, {ok:false,error:'ACCESS_DENIED',permission:err.permission||'usuarios'});
     return send(res, missing ? 503 : 500, { ok:false, error:missing ? 'DATABASE_NOT_CONNECTED' : 'SERVER_ERROR' });
   }
 };
