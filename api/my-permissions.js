@@ -1,5 +1,5 @@
 const {getSql,ensureCompany,authenticate,send}=require('./_db');
-const {getUserPermissions}=require('./_permissions');
+const {getUserPermissions}=require('../lib/permissions');
 module.exports=async function handler(req,res){
   try{
     if(req.method!=='GET')return send(res,405,{ok:false,error:'METHOD_NOT_ALLOWED'});
