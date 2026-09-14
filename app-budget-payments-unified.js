@@ -44,6 +44,9 @@
     let holder=view.querySelector(':scope > .budgetUnifiedTop');
     if(!holder){holder=document.createElement('div');holder.className='budgetUnifiedTop';view.insertBefore(holder,view.firstChild)}
     const stats=currentBudgetStats();
+    const signature=[active,stats.count,stats.approved,stats.total.toFixed(2),can('financeiro')?'1':'0'].join('|');
+    if(holder.dataset.renderSignature===signature)return;
+    holder.dataset.renderSignature=signature;
     holder.innerHTML=`<div class="budgetUnifiedHero">
       <div class="budgetUnifiedHeroMain"><span class="budgetHeroIcon">▤</span><div><span class="eyebrow">ORÇAMENTOS & PAGAMENTOS</span><h2>Central de orçamentos</h2><p>Crie propostas, acompanhe aprovações e organize recebimentos em um único lugar.</p></div></div>
       <div class="budgetUnifiedStats"><div><small>Orçamentos</small><b>${stats.count}</b></div><div><small>Aprovados</small><b>${stats.approved}</b></div><div><small>Total orçado</small><b>${money(stats.total)}</b></div></div>
@@ -86,6 +89,9 @@
     const group=[...host.querySelectorAll('.advancedToolGroup')].find(g=>normalize(g.querySelector('.advancedGroupHead h3')?.textContent)==='orcamentos e pagamentos');
     if(!group)return;
     const stats=currentBudgetStats();
+    const signature=[stats.count,stats.approved,stats.total.toFixed(2),can('financeiro')?'1':'0'].join('|');
+    if(group.dataset.renderSignature===signature)return;
+    group.dataset.renderSignature=signature;
     group.classList.add('budgetDashboardGroup');
     const head=group.querySelector('.advancedGroupHead');if(head){head.querySelector('span')?.remove();head.querySelector('h3').textContent='Orçamentos & pagamentos'}
     const grid=group.querySelector('.advancedToolGrid');if(!grid)return;
@@ -121,6 +127,6 @@
 
   function periodic(){installSidebar();ensureTab('orcamento','new');ensureTab('historico','history');if($('financeiro'))ensureTab('financeiro','receivables');removePixPaymentButtons();beautifyDashboardBudgetGroup();updateActiveNav()}
 
-  function init(){installStyles();installSidebar();ensureTab('orcamento','new');ensureTab('historico','history');if($('financeiro'))ensureTab('financeiro','receivables');removePixPaymentButtons();monitorDashboard();setInterval(periodic,1800)}
+  function init(){installStyles();installSidebar();ensureTab('orcamento','new');ensureTab('historico','history');if($('financeiro'))ensureTab('financeiro','receivables');removePixPaymentButtons();monitorDashboard();setInterval(periodic,7000)}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(init,1500));else setTimeout(init,1500);
 })();
