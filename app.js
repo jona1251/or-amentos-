@@ -1,9 +1,9 @@
 (async()=>{
-  const parts=['cloud-sync.js','app-core.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-isolation.js','app-rate-limit.js','app-2fa-login.js','app-settings.js','app-logout-fix.js','app-cookies.js','app-security-panel.js','app-online-mode.js','app-premium.js','app-login-notifications.js','app-suite.js','app-suite-extras.js','app-user-permissions.js','app-access-enforcement.js','app-dashboard-tools.js','app-budget-payments-unified.js','app-clean-ui.js'];
+  const parts=['cloud-sync.js','app-core.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-isolation.js','app-rate-limit.js','app-2fa-login.js','app-settings.js','app-logout-fix.js','app-cookies.js','app-security-panel.js','app-online-mode.js','app-premium.js','app-login-notifications.js','app-suite.js','app-suite-extras.js','app-user-permissions.js','app-access-enforcement.js','app-dashboard-tools.js','app-budget-payments-unified.js','app-clean-ui.js','app-profile-presets-ui.js'];
   for(const file of parts){
     await new Promise((resolve,reject)=>{
       const script=document.createElement('script');
-      script.src=file+'?v=premiumtest15';
+      script.src=file+'?v=premiumtest16';
       script.onload=resolve;
       script.onerror=()=>reject(new Error('Falha ao carregar '+file));
       document.head.appendChild(script);
