@@ -3,7 +3,7 @@
   for(const file of parts){
     await new Promise((resolve,reject)=>{
       const script=document.createElement('script');
-      script.src=file+'?v=premiumtest10';
+      script.src=file+'?v=premiumtest11';
       script.onload=resolve;
       script.onerror=()=>reject(new Error('Falha ao carregar '+file));
       document.head.appendChild(script);
