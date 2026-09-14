@@ -5,12 +5,12 @@
     ['produtos','Produtos / Serviços','Acessar catálogo, preços e estoque.'],
     ['orcamentos','Orçamentos','Criar, editar, enviar e consultar orçamentos.'],
     ['contratos','Contratos','Gerar, editar e consultar contratos.'],
-    ['financeiro','Financeiro','Contas a receber, PIX, cobranças e despesas.'],
+    ['financeiro','Financeiro','Contas a receber, cobranças e despesas.'],
     ['operacoes','Operações','Agenda, ordens de serviço, estoque e compras.'],
     ['crm','CRM / Comercial','Funil, follow-up, fidelidade, cupons e comissões.'],
     ['relatorios','Relatórios','Busca global, relatórios, exportações e backups.'],
     ['custos','Custos e margens','Visualizar custo de produtos e margem de lucro.'],
-    ['configuracoes','Configurações','Alterar dados, logo, PIX e identidade da empresa.'],
+    ['configuracoes','Configurações','Alterar dados, logo e identidade da empresa.'],
     ['excluir','Excluir registros','Excluir clientes, produtos, orçamentos e outros registros.'],
     ['usuarios','Gerenciar usuários','Criar, editar, redefinir PIN e excluir usuários.'],
     ['seguranca','Segurança','Acessar sessões, 2FA, auditoria e painel de segurança.']
@@ -29,7 +29,7 @@
   function install(){
     const section=$('usuarios');if(!section||$('userAccessControlCard'))return;
     const card=document.createElement('div');card.className='card accessControlCard';card.id='userAccessControlCard';
-    card.innerHTML=`<div class="sectionLead"><div><span class="eyebrow">Permissões por usuário</span><h3>Controle de acesso</h3><p>Escolha exatamente quais partes do OrçaFácil cada usuário pode acessar.</p></div><button class="btn soft" onclick="reloadUserAccessControl()">↻ Atualizar</button></div><div class="accessInfo"><span>🔐</span><div><b>O administrador principal sempre possui acesso total.</b><small>As alterações abaixo entram em vigor no próximo acesso do usuário ou na próxima atualização online.</small></div></div><div id="userAccessList" class="accessUserList"><span class="muted">Carregando permissões...</span></div>`;
+    card.innerHTML=`<div class="sectionLead"><div><span class="eyebrow">Permissões por usuário</span><h3>Controle de acesso</h3><p>Perfis Operador podem ser limitados por módulo. Todo perfil Administrador possui acesso total automático.</p></div><button class="btn soft" onclick="reloadUserAccessControl()">↻ Atualizar</button></div><div class="accessInfo"><span>🔐</span><div><b>Todo perfil Administrador vê e usa todas as funções.</b><small>As permissões personalizadas abaixo são aplicadas somente aos usuários Operador.</small></div></div><div id="userAccessList" class="accessUserList"><span class="muted">Carregando permissões...</span></div>`;
     section.appendChild(card);installStyles();
     const nav=$('usersNav');if(nav)nav.addEventListener('click',()=>setTimeout(load,150));
     setTimeout(load,600);
@@ -41,24 +41,27 @@
 
   async function load(){
     const host=$('userAccessList');if(!host)return;
-    if((window.auth?.role||'')!=='admin'){host.innerHTML='<span class="muted">Somente o administrador principal pode gerenciar permissões.</span>';return}
+    if((window.auth?.role||'')!=='admin'){host.innerHTML='<span class="muted">Somente perfis Administrador podem gerenciar permissões.</span>';return}
     host.innerHTML='<span class="muted">Carregando permissões...</span>';
-    try{accessData=await req();render()}catch(e){if(e.message==='PRIMARY_ADMIN_ONLY'){host.innerHTML='<div class="accessInfo"><span>🔒</span><div><b>Controle reservado ao administrador principal.</b><small>Administradores secundários não podem alterar o acesso de outros usuários.</small></div></div>'}else host.innerHTML='<span class="muted">Não foi possível carregar as permissões. Verifique a conexão.</span>'}
+    try{accessData=await req();render()}catch(e){host.innerHTML='<span class="muted">Não foi possível carregar as permissões. Verifique a conexão.</span>'}
   }
   window.reloadUserAccessControl=load;
 
   function countEnabled(p){return MODULES.filter(([k])=>p?.[k]!==false).length}
   function render(){const host=$('userAccessList');if(!host||!accessData)return;host.innerHTML=(accessData.users||[]).map(u=>{
     const p=u.permissions||{},count=countEnabled(p),full=count===MODULES.length;
-    if(u.primaryAdmin)return `<div class="accessUser"><div class="accessUserHead"><div class="accessUserIdentity"><div class="accessUserAvatar">${esc((u.name||'A').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)} <span class="accessLockBadge">Administrador principal</span></b><small>@${esc(u.login)} • acesso total permanente</small></div></div><span class="accessCount full">${MODULES.length}/${MODULES.length} módulos</span></div><div class="accessLocked">O administrador principal não pode ter permissões removidas, evitando bloqueio acidental do sistema.</div></div>`;
-    return `<div class="accessUser" data-access-user="${u.id}"><div class="accessUserHead"><div class="accessUserIdentity"><div class="accessUserAvatar">${esc((u.name||'U').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)} <span class="userRole ${u.role==='admin'?'admin':''}">${u.role==='admin'?'Administrador':'Operador'}</span></b><small>@${esc(u.login)}${u.email?' • '+esc(u.email):''}</small></div></div><div class="row"><span class="accessCount ${full?'full':''}" id="accessCount_${u.id}">${count}/${MODULES.length} módulos</span><button class="btn soft" onclick="toggleUserAccess('${u.id}')">Gerenciar acesso</button></div></div><div class="accessPanel hide" id="accessPanel_${u.id}"><div class="accessPresetRow"><label>Perfil rápido<br><select id="accessPreset_${u.id}"><option value="">Personalizado</option><option value="completo">Operador completo</option><option value="comercial">Comercial / Vendas</option><option value="tecnico">Técnico / Campo</option><option value="financeiro">Financeiro</option><option value="leitura">Consulta / Leitura</option></select></label><button class="btn soft" onclick="applyAccessPreset('${u.id}')">Aplicar perfil</button></div><div class="permissionGrid">${MODULES.map(([key,label,desc])=>`<label class="permissionToggle"><input type="checkbox" data-access-perm="${key}" data-access-user-id="${u.id}" ${p[key]!==false?'checked':''} onchange="updateAccessCounter('${u.id}')"><span><b>${label}</b><small>${desc}</small></span></label>`).join('')}</div><div class="accessFooter"><div class="accessFooterLeft"><button class="btn soft" onclick="setAllAccess('${u.id}',true)">Marcar todos</button><button class="btn soft" onclick="setAllAccess('${u.id}',false)">Desmarcar todos</button></div><button class="btn primary" onclick="saveUserAccess('${u.id}')">Salvar acesso</button></div></div></div>`;
+    if(u.role==='admin'||u.adminFull){
+      const badge=u.primaryAdmin?'Administrador principal':'Administrador';
+      return `<div class="accessUser"><div class="accessUserHead"><div class="accessUserIdentity"><div class="accessUserAvatar">${esc((u.name||'A').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)} <span class="accessLockBadge">${badge}</span></b><small>@${esc(u.login)} • acesso total permanente</small></div></div><span class="accessCount full">${MODULES.length}/${MODULES.length} módulos</span></div><div class="accessLocked">Este perfil é Administrador e, por regra do sistema, possui acesso total a todos os módulos, ações e ferramentas.</div></div>`;
+    }
+    return `<div class="accessUser" data-access-user="${u.id}"><div class="accessUserHead"><div class="accessUserIdentity"><div class="accessUserAvatar">${esc((u.name||'U').charAt(0).toUpperCase())}</div><div><b>${esc(u.name)} <span class="userRole">Operador</span></b><small>@${esc(u.login)}${u.email?' • '+esc(u.email):''}</small></div></div><div class="row"><span class="accessCount ${full?'full':''}" id="accessCount_${u.id}">${count}/${MODULES.length} módulos</span><button class="btn soft" onclick="toggleUserAccess('${u.id}')">Gerenciar acesso</button></div></div><div class="accessPanel hide" id="accessPanel_${u.id}"><div class="accessPresetRow"><label>Perfil rápido<br><select id="accessPreset_${u.id}"><option value="">Personalizado</option><option value="completo">Operador completo</option><option value="comercial">Comercial / Vendas</option><option value="tecnico">Técnico / Campo</option><option value="financeiro">Financeiro</option><option value="leitura">Consulta / Leitura</option></select></label><button class="btn soft" onclick="applyAccessPreset('${u.id}')">Aplicar perfil</button></div><div class="permissionGrid">${MODULES.map(([key,label,desc])=>`<label class="permissionToggle"><input type="checkbox" data-access-perm="${key}" data-access-user-id="${u.id}" ${p[key]!==false?'checked':''} onchange="updateAccessCounter('${u.id}')"><span><b>${label}</b><small>${desc}</small></span></label>`).join('')}</div><div class="accessFooter"><div class="accessFooterLeft"><button class="btn soft" onclick="setAllAccess('${u.id}',true)">Marcar todos</button><button class="btn soft" onclick="setAllAccess('${u.id}',false)">Desmarcar todos</button></div><button class="btn primary" onclick="saveUserAccess('${u.id}')">Salvar acesso</button></div></div></div>`;
   }).join('')||'<span class="muted">Nenhum usuário cadastrado.</span>'}
 
   window.toggleUserAccess=id=>$('accessPanel_'+id)?.classList.toggle('hide');
   window.updateAccessCounter=id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const n=boxes.filter(x=>x.checked).length,el=$('accessCount_'+id);if(el){el.textContent=`${n}/${MODULES.length} módulos`;el.classList.toggle('full',n===MODULES.length)}};
   window.setAllAccess=(id,on)=>{document.querySelectorAll(`[data-access-user-id="${id}"]`).forEach(x=>x.checked=!!on);window.updateAccessCounter(id)};
   window.applyAccessPreset=id=>{const preset=$('accessPreset_'+id)?.value;if(!preset)return;const p=accessData?.presets?.[preset];if(!p)return;document.querySelectorAll(`[data-access-user-id="${id}"]`).forEach(x=>x.checked=p[x.dataset.accessPerm]!==false);window.updateAccessCounter(id)};
-  window.saveUserAccess=async id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const permissions={};boxes.forEach(x=>permissions[x.dataset.accessPerm]=x.checked);try{await req({method:'POST',body:JSON.stringify({mode:'save',userId:id,permissions})});window.toast?.('Permissões atualizadas');await load()}catch(e){window.toast?.('Não foi possível salvar as permissões')}};
+  window.saveUserAccess=async id=>{const boxes=[...document.querySelectorAll(`[data-access-user-id="${id}"]`)];const permissions={};boxes.forEach(x=>permissions[x.dataset.accessPerm]=x.checked);try{await req({method:'POST',body:JSON.stringify({mode:'save',userId:id,permissions})});window.toast?.('Permissões atualizadas');await load()}catch(e){if(e.message==='ADMIN_ALWAYS_FULL_ACCESS')window.toast?.('Administradores sempre possuem acesso total');else window.toast?.('Não foi possível salvar as permissões')}};
 
   const oldLoad=window.loadUsers;window.loadUsers=async function(...args){const r=typeof oldLoad==='function'?await oldLoad.apply(this,args):undefined;setTimeout(load,100);return r};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(install,900));else setTimeout(install,900);
