@@ -43,7 +43,7 @@
     add('.pageTitle h1','font-black','tracking-tight','text-slate-950');
     add('.pageTitle small','text-slate-500');
     add('.card','bg-white','border-slate-200','rounded-2xl','shadow-sm','transition-all','duration-200','hover:shadow-md');
-    add('.sectionLead h3','.font-extrabold');
+    add('.sectionLead h3','font-extrabold');
     add('.muted','text-slate-500');
     add('.eyebrow','bg-slate-100','text-slate-600','font-extrabold');
     add('.badge','bg-slate-100','text-slate-600');
@@ -150,8 +150,16 @@
   }
 
   async function init(){
-    try{await loadTailwind();ready=true;apply();watch();window.addEventListener('resize',apply);window.addEventListener('online',apply)}
-    catch(err){console.warn('Tailwind visual layer unavailable; keeping base styles.',err)}
+    try{
+      await loadTailwind();
+      ready=true;
+      apply();
+      watch();
+      window.addEventListener('resize',apply);
+      window.addEventListener('online',apply);
+    }catch(err){
+      console.warn('Tailwind visual layer unavailable; keeping base styles.',err);
+    }
   }
 
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(init,120));else setTimeout(init,120);
