@@ -5,6 +5,7 @@
   async function offlineFromServerHash(login,serverHash){
     return window.hash('orcafacil-offline-v1|'+normalize(login)+'|'+String(serverHash||''));
   }
+  window.orcaOfflineFromServerHash=offlineFromServerHash;
 
   window.orcaCredentialsFromPin=async function(login,pin){
     const serverHash=await window.hash(String(pin||''));
@@ -22,13 +23,24 @@
     if(!record)return record;
     const next={...record,id:'admin'};
     if(next.pinHash){
-      if(!next.offlinePinHash)next.offlinePinHash=await offlineFromServerHash(next.login||'admin',next.pinHash);
+      next.offlinePinHash=await offlineFromServerHash(next.login||'admin',next.pinHash);
       if(!next.serverId&&!next.pendingRegistrationPinHash)next.pendingRegistrationPinHash=next.pinHash;
       delete next.pinHash;
     }
     return next;
   }
   window.orcaSanitizeAuthRecord=sanitizeAuth;
+
+  const baseLocalPut=window.localPut;
+  if(typeof baseLocalPut==='function'){
+    window.localPut=async function(store,record){
+      if(store!=='auth')return baseLocalPut(store,record);
+      const next=await sanitizeAuth(record);
+      const out=await baseLocalPut(store,next);
+      if(next)window.setAppAuth?.(next);
+      return out;
+    };
+  }
 
   async function persistAuth(record){
     const next=await sanitizeAuth(record);
