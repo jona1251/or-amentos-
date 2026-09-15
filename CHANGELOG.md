@@ -1,5 +1,51 @@
 # OrçaFácil Pro — Histórico de versões
 
+## v3.5.0-premium-test — Isolamento local por usuário
+
+### Novas funcionalidades
+- O IndexedDB passou a usar namespace local por usuário para configurações, clientes, produtos, orçamentos e contratos.
+- O namespace prefere o ID real do usuário da nuvem, mantendo os dados locais estáveis mesmo se o login for alterado.
+- Foi adicionada migração automática dos registros legados sem namespace para o usuário atual.
+- Foi adicionada promoção automática do espaço local quando um usuário local recebe seu ID definitivo da nuvem.
+- Foi adicionado diagnóstico interno `orcaLocalScopeInfo()` para conferir o namespace ativo e a quantidade de registros por store.
+
+### Correções
+- Trocar de usuário não apaga mais o cache local do usuário anterior.
+- O carregamento do novo usuário limpa apenas o namespace dele antes de aplicar o snapshot recebido da nuvem.
+- Em caso de falha durante a troca de usuário, o sistema retorna ao contexto anterior sem precisar reconstruir os dados daquele usuário.
+- O pull autenticado após login passa a usar a sessão HttpOnly em vez de enviar o hash do PIN como cabeçalho de autenticação.
+- Cache da PWA atualizado para incluir a nova camada de isolamento local.
+
+### Melhorias
+- A separação local agora acompanha o isolamento já existente no servidor por `owner_user_id`.
+- A mudança reduz o risco de exposição de dados entre usuários que utilizam o mesmo navegador ou computador.
+- A troca entre Administrador e Operadores passa a reaproveitar o cache correto de cada perfil sem misturar os stores principais.
+
+### Mudanças de interface
+- Nenhuma mudança visual invasiva nesta versão.
+- A tela de troca de usuário continua exibindo o estado “Carregando seu espaço...”, mas agora a operação trabalha somente no namespace do usuário autenticado.
+
+### Banco de dados
+- Nenhuma migration destrutiva no PostgreSQL nesta versão.
+- O isolamento desta etapa acontece no IndexedDB do navegador; o schema do servidor não foi alterado.
+
+### APIs
+- O fluxo de login continua criando sessão HttpOnly.
+- A leitura inicial de `/api/data` após autenticação usa essa sessão do navegador.
+- O fallback legado do servidor ainda existe temporariamente para compatibilidade com módulos antigos e será removido em uma etapa posterior.
+
+### Testes e validação
+- Revisão estática dos fluxos de login, troca de usuário, migração de dados locais e pull da nuvem.
+- Build/deploy deve ser validado na Vercel antes de qualquer promoção para `main`.
+- A regressão E2E em navegador real ainda é obrigatória antes da promoção.
+
+### Problemas conhecidos / próximos passos
+- Alguns módulos antigos ainda enviam cabeçalhos legados com hash do PIN; a próxima etapa de segurança deve centralizar as requisições em sessão HttpOnly e remover esses cabeçalhos de todo o frontend.
+- O hash local do PIN ainda é mantido para permitir autenticação offline; ele deve ser separado da credencial de servidor na próxima etapa.
+- A criação/alteração de schema ainda acontece em funções de inicialização; migrar para migrations versionadas continua recomendado.
+- Os identificadores locais das tabelas principais ainda usam unicidade por empresa em schemas legados; a migração para empresa + usuário deve ser planejada separadamente.
+- A separação de banco entre Preview e Produção precisa ser confirmada antes de testes destrutivos ou promoção.
+
 ## v3.4.0-premium-test — Estabilização, segurança e sincronização
 
 ### Novas funcionalidades
