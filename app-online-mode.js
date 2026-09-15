@@ -40,14 +40,14 @@
       const timeout=setTimeout(()=>controller.abort(),TIMEOUT_MS);
       let res;
       try{
-        res=await fetch('/api/health',{method:'GET',cache:'no-store',headers:{'Accept':'application/json'},signal:controller.signal});
+        res=await fetch('/api/health',{method:'GET',cache:'no-store',headers:{'Accept':'application/json'},signal:controller.signal,credentials:'same-origin'});
       }finally{clearTimeout(timeout)}
       let body={};try{body=await res.json()}catch(_){}
       if(res.ok&&body.ok){
         const wasOffline=lastState==='offline';
         lastState='online';
         setState('online','🟢 Online');
-        if(wasOffline&&window.auth?.pinHash){
+        if(wasOffline&&window.auth){
           setState('sync','🔄 Sincronizando');
           try{await window.cloudAfterLogin?.()}catch(_){}
           setState('online','🟢 Online');
