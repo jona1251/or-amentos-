@@ -1,4 +1,5 @@
 const { neon, Pool, neonConfig } = require('@neondatabase/serverless');
+const { getSessionUser } = require('./_session');
 
 try { neonConfig.webSocketConstructor = require('ws'); } catch (_) {}
 
@@ -227,6 +228,11 @@ async function ensureLegacyOwnership(sql, companyId) {
 }
 
 async function authenticate(sql, req) {
+  // Prefer the HttpOnly session cookie. The legacy PIN-hash headers remain only as a
+  // compatibility fallback while older clients are migrated.
+  const sessionUser = await getSessionUser(sql, req);
+  if (sessionUser) return { ...sessionUser, resolved_company_id:sessionUser.company_id, auth_method:'session' };
+
   const token = String(req.headers['x-orca-auth'] || '').trim();
   const login = String(req.headers['x-orca-user'] || '').trim().toLowerCase();
   if (!token) return null;
@@ -236,7 +242,9 @@ async function authenticate(sql, req) {
   } else {
     rows = await sql`SELECT u.*, c.id AS resolved_company_id FROM users u JOIN companies c ON c.id=u.company_id WHERE u.pin_hash=${token} ORDER BY u.created_at LIMIT 1`;
   }
-  return rows[0] || null;
+  if (!rows.length) return null;
+  rows[0].auth_method = 'legacy_header';
+  return rows[0];
 }
 
 function makeClientSql(client) {
