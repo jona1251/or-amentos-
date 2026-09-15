@@ -24,7 +24,9 @@
     const normalized=String(login||'admin').trim().toLowerCase();window.cloudLastLoginError=null;window.cloudRetryAfter=0;window.cloudAttemptsRemaining=null;
     if(!/^[a-z0-9._-]{3,30}$/.test(normalized)){if(!silent)window.toast?.('Informe um usuário válido');return false}
     if(!/^[0-9]{4,8}$/.test(String(pin||''))){if(!silent)window.toast?.('Informe seu PIN de 4 a 8 números');return false}
-    const oldAuth=window.auth?{...window.auth}:null,pinHash=await window.hash(pin);
+    const oldAuth=window.auth?{...window.auth}:null;
+    const creds=window.orcaCredentialsFromPin?await window.orcaCredentialsFromPin(normalized,pin):{serverHash:await window.hash(pin),offlinePinHash:await window.hash(pin)};
+    const pinHash=creds.serverHash;
     try{
       let body;
       try{body=await authCall(normalized,pinHash,'')}catch(e){
@@ -36,12 +38,10 @@
         }else throw e;
       }
       document.body.classList.add('switching-user');
-      const next={id:'admin',serverId:body.user?.id||null,name:body.user?.name||'Usuário',login:body.user?.login||normalized,role:body.user?.role||'operador',pinHash};
+      const next={id:'admin',serverId:body.user?.id||null,name:body.user?.name||'Usuário',login:body.user?.login||normalized,role:body.user?.role||'operador',offlinePinHash:creds.offlinePinHash};
       window.setAppAuth?.(next);await window.localPut('auth',next);
-      // Cada usuário possui seu próprio namespace local. O pull limpa apenas o namespace
-      // do usuário recém-autenticado; o cache dos demais usuários permanece isolado.
       await pull();
-      document.getElementById('login')?.classList.add('hide');const p=document.getElementById('loginPin');if(p)p.value='';window.cloudNeedsReauth=false;window.syncAdminSide?.();window.refreshUserAccessUI?.();window.applyRoleUI?.();window.setOrcaConnectionState?.('online','🟢 Online');return true;
+      document.getElementById('login')?.classList.add('hide');const p=document.getElementById('loginPin');if(p)p.value='';window.cloudNeedsReauth=false;window.syncAdminSide?.();window.refreshUserAccessUI?.();window.applyRoleUI?.();window.setOrcaConnectionState?.('online','🟢 Online');try{localStorage.setItem('orcafacil_active_session_v1','1')}catch(_){}return true;
     }catch(e){
       window.cloudLastLoginError=e.message;window.cloudRetryAfter=Number(e.retryAfter||0);window.cloudAttemptsRemaining=e.attemptsRemaining;
       await restoreContext(oldAuth);
@@ -57,7 +57,9 @@
     if(window.cloudLastLoginError==='INVALID_CREDENTIALS'){const n=Number(window.cloudAttemptsRemaining);return window.toast?.(Number.isFinite(n)&&n>0?`Usuário ou PIN incorreto. Restam ${n} tentativa${n===1?'':'s'}.`:'Usuário ou PIN incorreto')}
     if(window.cloudLastLoginError==='TWO_FACTOR_REQUIRED')return window.toast?.('O código 2FA é obrigatório para esta conta');
     if(window.cloudLastLoginError==='INVALID_2FA_CODE')return window.toast?.('Código 2FA inválido');
-    const localLogin=String(window.auth?.login||'admin').trim().toLowerCase();if(window.auth&&localLogin===login&&await window.hash(pin)===window.auth.pinHash){document.getElementById('login')?.classList.add('hide');const p=document.getElementById('loginPin');if(p)p.value='';try{localStorage.setItem('orcafacil_active_session_v1','1')}catch(_){}window.refreshUserAccessUI?.();window.cloudAfterLogin?.();return}
+    const localLogin=String(window.auth?.login||'admin').trim().toLowerCase();
+    const localOk=window.auth&&localLogin===login&&(window.orcaVerifyOfflinePin?await window.orcaVerifyOfflinePin(pin,window.auth):false);
+    if(localOk){document.getElementById('login')?.classList.add('hide');const p=document.getElementById('loginPin');if(p)p.value='';try{localStorage.setItem('orcafacil_active_session_v1','1')}catch(_){}window.refreshUserAccessUI?.();window.cloudAfterLogin?.();return}
     window.toast?.('Não foi possível entrar. Confira a conexão e tente novamente.')
   };
 })();
