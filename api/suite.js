@@ -3,6 +3,7 @@ const QRCode = require('qrcode');
 const { getSql, ensureCompany, authenticate, withRlsSql, send } = require('./_db');
 const { ensureSessionTable } = require('./_session');
 const { ensureSuiteSchema, generateTotpSecret, verifyTotp } = require('./_suite_schema');
+const { getUserPermissions } = require('../lib/permissions');
 
 const KINDS = new Set([
   'expense','appointment','work_order','supplier','purchase_order','budget_template','contract_template',
@@ -10,13 +11,28 @@ const KINDS = new Set([
   'budget_version','sale','company_profile','theme','ai_draft','payment_config','reminder','checklist','attachment',
   'report_preset','category','trash_note','integration','automation','payment_link','signature_request'
 ]);
+const KIND_PERMISSION = {
+  expense:'operacoes',appointment:'operacoes',work_order:'operacoes',supplier:'operacoes',purchase_order:'operacoes',
+  stock_movement:'operacoes',reminder:'operacoes',checklist:'operacoes',attachment:'operacoes',
+  budget_template:'crm',contract_template:'crm',custom_field:'crm',tag:'crm',commission:'crm',coupon:'crm',
+  crm_lead:'crm',follow_up:'crm',loyalty:'crm',category:'crm',
+  sale:'financeiro',payment_config:'financeiro',payment_link:'financeiro',
+  favorite:'relatorios',budget_version:'relatorios',company_profile:'relatorios',theme:'relatorios',ai_draft:'relatorios',
+  report_preset:'relatorios',trash_note:'relatorios',integration:'relatorios',automation:'relatorios',
+  signature_request:'contratos'
+};
 
 function localId(v){return String(v||'').trim().slice(0,120)}
 function cleanKind(v){const k=String(v||'').trim();return KINDS.has(k)?k:null}
 function safeDate(v){const s=String(v||'').trim();return /^\d{4}-\d{2}-\d{2}$/.test(s)?s:null}
 function json(v){return JSON.stringify(v||{})}
 function reqInfo(req){return {ip:String(req.headers['x-forwarded-for']||req.headers['x-real-ip']||'').split(',')[0].trim().slice(0,120),userAgent:String(req.headers['user-agent']||'').slice(0,500)}}
-function origin(req){const p=String(req.headers['x-forwarded-proto']||'https').split(',')[0].trim();const h=String(req.headers['x-forwarded-host']||req.headers.host||'').split(',')[0].trim();return h?`${p}://${h}`:''}
+function origin(req){const rawP=String(req.headers['x-forwarded-proto']||'https').split(',')[0].trim();const p=rawP==='http'?'http':'https';const h=String(req.headers['x-forwarded-host']||req.headers.host||'').split(',')[0].trim().replace(/[\r\n]/g,'');return h?`${p}://${h}`:''}
+function can(access,key){return !!access?.adminFull||!!access?.primary||access?.permissions?.[key]!==false}
+function demand(access,key){if(can(access,key))return;const err=new Error('ACCESS_DENIED');err.code='ACCESS_DENIED';err.permission=key;throw err}
+function demandAny(access,keys){if(keys.some(k=>can(access,k)))return;const err=new Error('ACCESS_DENIED');err.code='ACCESS_DENIED';err.permission=keys[0];throw err}
+function kindPermission(kind){return KIND_PERMISSION[kind]||'relatorios'}
+function allowedKind(access,kind){return can(access,kindPermission(kind))}
 
 async function isPrimaryAdmin(sql, companyId, user){
   if(user.role!=='admin') return false;
@@ -43,15 +59,16 @@ async function getRecords(sql, companyId, userId, kind, includeDeleted=false){
   return rows.map(r=>({id:r.id,kind:r.kind,localId:r.local_id,title:r.title||'',status:r.status||'',amount:Number(r.amount||0),dueDate:r.due_date||null,data:r.data||{},favorite:!!r.favorite,deletedAt:r.deleted_at||null,createdAt:r.created_at,updatedAt:r.updated_at}));
 }
 
-async function coreSummary(sql, companyId, userId){
+async function coreSummary(sql, companyId, userId, access){
+  const empty=[{total:0,stock:0,value:0,approved:0}];
   const [clients,products,budgets,contracts,records] = await Promise.all([
-    sql`SELECT count(*)::int total FROM clients WHERE company_id=${companyId} AND owner_user_id=${userId}`,
-    sql`SELECT count(*)::int total, COALESCE(sum(stock),0)::numeric stock FROM products WHERE company_id=${companyId} AND owner_user_id=${userId}`,
-    sql`SELECT count(*)::int total, COALESCE(sum(total),0)::numeric value, count(*) FILTER (WHERE status='Aprovado')::int approved FROM budgets WHERE company_id=${companyId} AND owner_user_id=${userId}`,
-    sql`SELECT count(*)::int total FROM contracts WHERE company_id=${companyId} AND owner_user_id=${userId}`,
+    can(access,'clientes')?sql`SELECT count(*)::int total FROM clients WHERE company_id=${companyId} AND owner_user_id=${userId}`:empty,
+    can(access,'produtos')?sql`SELECT count(*)::int total, COALESCE(sum(stock),0)::numeric stock FROM products WHERE company_id=${companyId} AND owner_user_id=${userId}`:empty,
+    can(access,'orcamentos')?sql`SELECT count(*)::int total, COALESCE(sum(total),0)::numeric value, count(*) FILTER (WHERE status='Aprovado')::int approved FROM budgets WHERE company_id=${companyId} AND owner_user_id=${userId}`:empty,
+    can(access,'contratos')?sql`SELECT count(*)::int total FROM contracts WHERE company_id=${companyId} AND owner_user_id=${userId}`:empty,
     sql`SELECT kind,count(*)::int total,COALESCE(sum(amount),0)::numeric amount FROM business_records WHERE company_id=${companyId} AND owner_user_id=${userId} AND deleted_at IS NULL GROUP BY kind`
   ]);
-  const byKind={};for(const r of records)byKind[r.kind]={total:Number(r.total||0),amount:Number(r.amount||0)};
+  const byKind={};for(const r of records)if(allowedKind(access,r.kind))byKind[r.kind]={total:Number(r.total||0),amount:Number(r.amount||0)};
   return {clients:Number(clients[0]?.total||0),products:Number(products[0]?.total||0),stock:Number(products[0]?.stock||0),budgets:Number(budgets[0]?.total||0),budgetValue:Number(budgets[0]?.value||0),approved:Number(budgets[0]?.approved||0),contracts:Number(contracts[0]?.total||0),byKind};
 }
 
@@ -62,20 +79,25 @@ module.exports = async function handler(req,res){
     await ensureSuiteSchema(adminSql);
     const user=await authenticate(adminSql,req);
     if(!user)return send(res,401,{ok:false,error:'UNAUTHORIZED'});
+    const access=await getUserPermissions(adminSql,company.id,user);
 
     if(req.method==='GET'){
       const action=String(req.query?.action||'records');
       if(action==='records'){
         const kind=String(req.query?.kind||'').trim();if(kind&&!cleanKind(kind))return send(res,400,{ok:false,error:'INVALID_KIND'});
-        const includeDeleted=String(req.query?.deleted||'')==='1';
-        const records=await withRlsSql(company.id,user,sql=>getRecords(sql,company.id,user.id,kind||null,includeDeleted));
+        if(kind)demand(access,kindPermission(kind));else demandAny(access,['operacoes','crm','relatorios','financeiro','contratos']);
+        const includeDeleted=String(req.query?.deleted||'')==='1';if(includeDeleted)demand(access,'relatorios');
+        let records=await withRlsSql(company.id,user,sql=>getRecords(sql,company.id,user.id,kind||null,includeDeleted));
+        if(!kind)records=records.filter(r=>allowedKind(access,r.kind));
         return send(res,200,{ok:true,records});
       }
       if(action==='summary'){
-        const summary=await withRlsSql(company.id,user,sql=>coreSummary(sql,company.id,user.id));
+        demandAny(access,['dashboard','operacoes','crm','relatorios','financeiro','orcamentos','contratos']);
+        const summary=await withRlsSql(company.id,user,sql=>coreSummary(sql,company.id,user.id,access));
         return send(res,200,{ok:true,summary});
       }
       if(action==='activity'){
+        demand(access,'relatorios');
         const ownOnly=user.role!=='admin';
         const rows=await adminSql`
           SELECT a.id,a.entity_kind,a.entity_local_id,a.action,a.details,a.created_at,u.name,u.local_id
@@ -86,6 +108,7 @@ module.exports = async function handler(req,res){
         return send(res,200,{ok:true,events:rows.map(x=>({id:x.id,kind:x.entity_kind,localId:x.entity_local_id,action:x.action,details:x.details||{},createdAt:x.created_at,userName:x.name||'',login:x.local_id||''}))});
       }
       if(action==='permissions'){
+        demand(access,'usuarios');
         if(user.role!=='admin')return send(res,403,{ok:false,error:'ADMIN_ONLY'});
         const rows=await adminSql`
           SELECT u.id,u.name,u.local_id,u.role,COALESCE(p.permissions,'{}'::jsonb) permissions
@@ -95,6 +118,7 @@ module.exports = async function handler(req,res){
         return send(res,200,{ok:true,users:rows.map(x=>({id:x.id,name:x.name,login:x.local_id,role:x.role,permissions:x.permissions||{}}))});
       }
       if(action==='sessions'){
+        demand(access,'seguranca');
         await ensureSessionTable(adminSql);
         const primary=await isPrimaryAdmin(adminSql,company.id,user);
         const rows=await adminSql`
@@ -106,24 +130,27 @@ module.exports = async function handler(req,res){
         return send(res,200,{ok:true,sessions:rows.map(x=>({id:x.id,userId:x.user_id,userName:x.name,login:x.local_id,createdAt:x.created_at,lastSeenAt:x.last_seen_at,expiresAt:x.expires_at,ip:x.ip||'',userAgent:x.user_agent||'',deviceName:x.device_name||''}))});
       }
       if(action==='security'){
+        demand(access,'seguranca');
         const rows=await adminSql`SELECT totp_enabled FROM user_security WHERE company_id=${company.id} AND user_id=${user.id} LIMIT 1`;
         return send(res,200,{ok:true,totpEnabled:!!rows[0]?.totp_enabled});
       }
       if(action==='backups'){
+        demand(access,'relatorios');
         const rows=await withRlsSql(company.id,user,sql=>sql`SELECT id,label,created_at FROM suite_backups WHERE company_id=${company.id} AND owner_user_id=${user.id} ORDER BY created_at DESC LIMIT 30`);
         return send(res,200,{ok:true,backups:rows.map(x=>({id:x.id,label:x.label||'',createdAt:x.created_at}))});
       }
       if(action==='search'){
+        demand(access,'relatorios');
         const q=String(req.query?.q||'').trim().toLowerCase().slice(0,80);if(q.length<2)return send(res,200,{ok:true,results:[]});
         const pattern=`%${q}%`;
         const results=await withRlsSql(company.id,user,async sql=>{
           const [c,p,b,ct,r]=await Promise.all([
-            sql`SELECT local_id id,'client' kind,name title,coalesce(phone,'') subtitle FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(name) LIKE ${pattern} OR lower(coalesce(document,'')) LIKE ${pattern} OR lower(coalesce(phone,'')) LIKE ${pattern}) LIMIT 20`,
-            sql`SELECT local_id id,'product' kind,name title,coalesce(code,'') subtitle FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(name) LIKE ${pattern} OR lower(coalesce(code,'')) LIKE ${pattern} OR lower(coalesce(category,'')) LIKE ${pattern}) LIMIT 20`,
-            sql`SELECT local_id id,'budget' kind,number title,status subtitle FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(number) LIKE ${pattern} OR lower(status) LIKE ${pattern}) LIMIT 20`,
-            sql`SELECT local_id id,'contract' kind,number title,status subtitle FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(number) LIKE ${pattern} OR lower(status) LIKE ${pattern}) LIMIT 20`,
-            sql`SELECT local_id id,kind,title,coalesce(status,'') subtitle FROM business_records WHERE company_id=${company.id} AND owner_user_id=${user.id} AND deleted_at IS NULL AND (lower(coalesce(title,'')) LIKE ${pattern} OR lower(data::text) LIKE ${pattern}) LIMIT 30`
-          ]);return [...c,...p,...b,...ct,...r];
+            can(access,'clientes')?sql`SELECT local_id id,'client' kind,name title,coalesce(phone,'') subtitle FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(name) LIKE ${pattern} OR lower(coalesce(document,'')) LIKE ${pattern} OR lower(coalesce(phone,'')) LIKE ${pattern}) LIMIT 20`:[],
+            can(access,'produtos')?sql`SELECT local_id id,'product' kind,name title,coalesce(code,'') subtitle FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(name) LIKE ${pattern} OR lower(coalesce(code,'')) LIKE ${pattern} OR lower(coalesce(category,'')) LIKE ${pattern}) LIMIT 20`:[],
+            can(access,'orcamentos')?sql`SELECT local_id id,'budget' kind,number title,status subtitle FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(number) LIKE ${pattern} OR lower(status) LIKE ${pattern}) LIMIT 20`:[],
+            can(access,'contratos')?sql`SELECT local_id id,'contract' kind,number title,status subtitle FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id} AND (lower(number) LIKE ${pattern} OR lower(status) LIKE ${pattern}) LIMIT 20`:[],
+            sql`SELECT local_id id,kind,title,coalesce(status,'') subtitle FROM business_records WHERE company_id=${company.id} AND owner_user_id=${user.id} AND deleted_at IS NULL AND (lower(coalesce(title,'')) LIKE ${pattern} OR lower(data::text) LIKE ${pattern}) LIMIT 60`
+          ]);return [...c,...p,...b,...ct,...r.filter(x=>allowedKind(access,x.kind))];
         });
         return send(res,200,{ok:true,results});
       }
@@ -146,7 +173,7 @@ module.exports = async function handler(req,res){
 
     if(action==='save_record'){
       const kind=cleanKind(req.body?.kind),id=localId(req.body?.localId)||crypto.randomUUID();
-      if(!kind)return send(res,400,{ok:false,error:'INVALID_KIND'});
+      if(!kind)return send(res,400,{ok:false,error:'INVALID_KIND'});demand(access,kindPermission(kind));
       const title=String(req.body?.title||'').slice(0,250),status=String(req.body?.status||'').slice(0,80);
       const amount=Number.isFinite(Number(req.body?.amount))?Number(req.body.amount):null,due=safeDate(req.body?.dueDate),data=req.body?.data&&typeof req.body.data==='object'?req.body.data:{};
       const favorite=!!req.body?.favorite;
@@ -162,7 +189,7 @@ module.exports = async function handler(req,res){
     }
 
     if(action==='delete_record'||action==='restore_record'||action==='purge_record'){
-      const kind=cleanKind(req.body?.kind),id=localId(req.body?.localId);if(!kind||!id)return send(res,400,{ok:false,error:'INVALID_RECORD'});
+      const kind=cleanKind(req.body?.kind),id=localId(req.body?.localId);if(!kind||!id)return send(res,400,{ok:false,error:'INVALID_RECORD'});demand(access,kindPermission(kind));if(action==='purge_record')demand(access,'excluir');
       await withRlsSql(company.id,user,async sql=>{
         if(action==='delete_record')await sql`UPDATE business_records SET deleted_at=now(),updated_at=now() WHERE company_id=${company.id} AND owner_user_id=${user.id} AND kind=${kind} AND local_id=${id}`;
         if(action==='restore_record')await sql`UPDATE business_records SET deleted_at=NULL,updated_at=now() WHERE company_id=${company.id} AND owner_user_id=${user.id} AND kind=${kind} AND local_id=${id}`;
@@ -172,14 +199,15 @@ module.exports = async function handler(req,res){
     }
 
     if(action==='set_permissions'){
-      if(user.role!=='admin')return send(res,403,{ok:false,error:'ADMIN_ONLY'});
+      demand(access,'usuarios');if(user.role!=='admin')return send(res,403,{ok:false,error:'ADMIN_ONLY'});
       const target=String(req.body?.userId||''),permissions=req.body?.permissions&&typeof req.body.permissions==='object'?req.body.permissions:{};
-      const exists=await adminSql`SELECT id FROM users WHERE company_id=${company.id} AND id::text=${target} LIMIT 1`;if(!exists.length)return send(res,404,{ok:false,error:'USER_NOT_FOUND'});
+      const exists=await adminSql`SELECT id,role FROM users WHERE company_id=${company.id} AND id::text=${target} LIMIT 1`;if(!exists.length)return send(res,404,{ok:false,error:'USER_NOT_FOUND'});if(exists[0].role==='admin')return send(res,400,{ok:false,error:'ADMIN_ALWAYS_FULL_ACCESS'});
       await adminSql`INSERT INTO user_permissions(company_id,user_id,permissions,updated_at) VALUES(${company.id},${target},${json(permissions)}::jsonb,now()) ON CONFLICT(company_id,user_id) DO UPDATE SET permissions=EXCLUDED.permissions,updated_at=now()`;
       await logActivity(adminSql,company.id,user.id,'user',target,'permissions_update',permissions);return send(res,200,{ok:true});
     }
 
     if(action==='totp_setup'){
+      demand(access,'seguranca');
       const secret=generateTotpSecret();
       const recovery=Array.from({length:8},()=>crypto.randomBytes(4).toString('hex').toUpperCase());
       await adminSql`INSERT INTO user_security(company_id,user_id,totp_secret,totp_enabled,recovery_codes,updated_at) VALUES(${company.id},${user.id},${secret},false,${json(recovery)}::jsonb,now()) ON CONFLICT(company_id,user_id) DO UPDATE SET totp_secret=EXCLUDED.totp_secret,totp_enabled=false,recovery_codes=EXCLUDED.recovery_codes,updated_at=now()`;
@@ -189,30 +217,33 @@ module.exports = async function handler(req,res){
       return send(res,200,{ok:true,secret,uri,qr,recoveryCodes:recovery});
     }
     if(action==='totp_enable'){
+      demand(access,'seguranca');
       const code=String(req.body?.code||'');const rows=await adminSql`SELECT totp_secret FROM user_security WHERE company_id=${company.id} AND user_id=${user.id} LIMIT 1`;const secret=rows[0]?.totp_secret;
       if(!secret||!verifyTotp(secret,code))return send(res,400,{ok:false,error:'INVALID_2FA_CODE'});
       await adminSql`UPDATE user_security SET totp_enabled=true,updated_at=now() WHERE company_id=${company.id} AND user_id=${user.id}`;await logActivity(adminSql,company.id,user.id,'security',String(user.id),'totp_enabled',{});return send(res,200,{ok:true});
     }
     if(action==='totp_disable'){
+      demand(access,'seguranca');
       const code=String(req.body?.code||'');const rows=await adminSql`SELECT totp_secret,totp_enabled FROM user_security WHERE company_id=${company.id} AND user_id=${user.id} LIMIT 1`;if(rows[0]?.totp_enabled&& !verifyTotp(rows[0]?.totp_secret,code))return send(res,400,{ok:false,error:'INVALID_2FA_CODE'});
       await adminSql`UPDATE user_security SET totp_enabled=false,totp_secret=NULL,recovery_codes='[]'::jsonb,updated_at=now() WHERE company_id=${company.id} AND user_id=${user.id}`;return send(res,200,{ok:true});
     }
 
     if(action==='revoke_session'){
-      await ensureSessionTable(adminSql);const id=String(req.body?.sessionId||'');const primary=await isPrimaryAdmin(adminSql,company.id,user);
+      demand(access,'seguranca');await ensureSessionTable(adminSql);const id=String(req.body?.sessionId||'');const primary=await isPrimaryAdmin(adminSql,company.id,user);
       if(primary)await adminSql`DELETE FROM user_sessions WHERE company_id=${company.id} AND id::text=${id}`;else await adminSql`DELETE FROM user_sessions WHERE company_id=${company.id} AND user_id=${user.id} AND id::text=${id}`;
       return send(res,200,{ok:true});
     }
 
     if(action==='create_backup'){
+      demand(access,'relatorios');
       const snapshot=await withRlsSql(company.id,user,async sql=>{
         const [clients,products,budgets,contracts,records]=await Promise.all([
-          sql`SELECT * FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id}`,
-          sql`SELECT * FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id}`,
-          sql`SELECT * FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id}`,
-          sql`SELECT * FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id}`,
+          can(access,'clientes')?sql`SELECT * FROM clients WHERE company_id=${company.id} AND owner_user_id=${user.id}`:[],
+          can(access,'produtos')?sql`SELECT * FROM products WHERE company_id=${company.id} AND owner_user_id=${user.id}`:[],
+          can(access,'orcamentos')?sql`SELECT * FROM budgets WHERE company_id=${company.id} AND owner_user_id=${user.id}`:[],
+          can(access,'contratos')?sql`SELECT * FROM contracts WHERE company_id=${company.id} AND owner_user_id=${user.id}`:[],
           sql`SELECT * FROM business_records WHERE company_id=${company.id} AND owner_user_id=${user.id}`
-        ]);return {version:1,createdAt:new Date().toISOString(),clients,products,budgets,contracts,records};
+        ]);return {version:2,createdAt:new Date().toISOString(),clients,products,budgets,contracts,records:records.filter(x=>allowedKind(access,x.kind))};
       });
       const label=String(req.body?.label||'Backup automático').slice(0,120);
       const rows=await withRlsSql(company.id,user,sql=>sql`INSERT INTO suite_backups(company_id,owner_user_id,label,snapshot) VALUES(${company.id},${user.id},${label},${json(snapshot)}::jsonb) RETURNING id,created_at`);
@@ -222,6 +253,7 @@ module.exports = async function handler(req,res){
     if(action==='create_public_link'){
       const linkType=String(req.body?.linkType||'').trim();if(!['payment','signature'].includes(linkType))return send(res,400,{ok:false,error:'INVALID_LINK_TYPE'});
       const entityKind=String(req.body?.entityKind||'').slice(0,80),entityId=localId(req.body?.entityLocalId);if(!entityKind||!entityId)return send(res,400,{ok:false,error:'INVALID_ENTITY'});
+      if(linkType==='payment')demand(access,'financeiro');else if(entityKind==='contract')demand(access,'contratos');else if(entityKind==='work_order')demand(access,'operacoes');else demand(access,'relatorios');
       const token=crypto.randomBytes(24).toString('hex');const payload=req.body?.payload&&typeof req.body.payload==='object'?req.body.payload:{};
       await adminSql`INSERT INTO suite_public_links(token,company_id,owner_user_id,link_type,entity_kind,entity_local_id,payload,expires_at) VALUES(${token},${company.id},${user.id},${linkType},${entityKind},${entityId},${json(payload)}::jsonb,now()+interval '30 days')`;
       const path=linkType==='payment'?'/api/public-payment?token=':'/api/public-signature?token=';
@@ -229,6 +261,7 @@ module.exports = async function handler(req,res){
     }
 
     if(action==='expire_budgets'){
+      demand(access,'orcamentos');
       const changed=await withRlsSql(company.id,user,async sql=>{
         const rows=await sql`UPDATE budgets SET status='Vencido',updated_at=now() WHERE company_id=${company.id} AND owner_user_id=${user.id} AND status IN ('Rascunho','Enviado','Visualizado') AND created_at + (valid_days||' days')::interval < now() RETURNING local_id`;
         return rows.map(x=>x.local_id);
@@ -244,7 +277,7 @@ module.exports = async function handler(req,res){
     return send(res,400,{ok:false,error:'INVALID_ACTION'});
   }catch(err){
     console.error('suite',err);
-    const missing=err?.message==='DATABASE_URL_NOT_CONFIGURED';
-    return send(res,missing?503:500,{ok:false,error:missing?'DATABASE_NOT_CONNECTED':'SERVER_ERROR',detail:String(err?.message||'').slice(0,180)});
+    const missing=err?.message==='DATABASE_URL_NOT_CONFIGURED';const denied=err?.message==='ACCESS_DENIED'||err?.code==='ACCESS_DENIED';
+    return send(res,denied?403:(missing?503:500),{ok:false,error:denied?'ACCESS_DENIED':(missing?'DATABASE_NOT_CONNECTED':'SERVER_ERROR'),...(denied?{permission:err.permission||null}:{detail:String(err?.message||'').slice(0,180)})});
   }
 };
