@@ -1,5 +1,55 @@
 # OrçaFácil Pro — Histórico de versões
 
+## v3.6.0-premium-test — Sessão HttpOnly e credencial offline separada
+
+### Novas funcionalidades
+- Adicionada uma camada central de requisições (`app-api-session.js`) para toda chamada same-origin em `/api/*`.
+- A camada central remove automaticamente os cabeçalhos legados `x-orca-auth` e `x-orca-user` antes de qualquer requisição chegar ao servidor.
+- As chamadas autenticadas passam a depender do cookie de sessão HttpOnly criado no login.
+- Criada credencial local independente (`offlinePinHash`) para validar o PIN no modo offline sem reutilizar o hash enviado ao servidor no login.
+- Adicionada migração automática de registros de autenticação antigos que ainda possuíam `pinHash`.
+- O hash usado no login do servidor deixa de ser persistido para contas já vinculadas à nuvem.
+
+### Correções
+- A sincronização automática não tenta mais renovar sessão reutilizando silenciosamente um hash de PIN armazenado.
+- Quando a sessão da nuvem expira, o sistema solicita um novo login em vez de reutilizar a credencial do servidor em segundo plano.
+- Reconexão online, notificações de acesso e sincronização agora funcionam com a existência da conta/sessão, sem depender de `auth.pinHash`.
+- Alterações futuras do PIN do usuário atual são sanitizadas antes de serem persistidas no IndexedDB.
+- O cache PWA passou a incluir as novas camadas de sessão e credencial local.
+
+### Segurança
+- Requisições de clientes, produtos, orçamentos, contratos, financeiro, CRM, permissões, segurança e demais módulos passam por um filtro global que impede o envio dos antigos cabeçalhos reutilizáveis.
+- O PIN continua sendo transformado em hash apenas durante uma tentativa explícita de login ou cadastro inicial.
+- Após login bem-sucedido, a autenticação das APIs é feita pelo cookie HttpOnly, que não fica acessível ao JavaScript.
+- A credencial offline usa domínio separado (`orcafacil-offline-v1`) e não é aceita pelo servidor como credencial de API.
+- O primeiro cadastro local ainda pode manter temporariamente `pendingRegistrationPinHash` somente até concluir o bootstrap da conta na nuvem; após o cadastro ele é removido.
+
+### Interface
+- Nenhuma mudança visual invasiva nesta versão.
+- Sessões lembradas continuam abrindo o painel sem novo PIN quando o cookie HttpOnly ainda é válido.
+- Quando o cookie expirou, a tela de login é exibida normalmente.
+
+### Banco de dados
+- Nenhuma migration destrutiva nesta versão.
+- Nenhuma alteração de schema PostgreSQL necessária para a separação de credenciais do frontend.
+
+### APIs
+- `/api/auth` continua recebendo `pinHash` apenas nas ações explícitas de `login` e `register`.
+- As demais APIs são consumidas por sessão HttpOnly.
+- O fallback legado em `api/_db.js` permanece temporariamente no servidor para rollback/compatibilidade, mas o frontend v3.6.0 não transmite mais os cabeçalhos antigos.
+
+### Testes e validação
+- Revisão estática dos fluxos de login, 2FA, sessão persistente, sincronização, reconexão, troca de usuário e modo offline.
+- A integração GitHub → Vercel deve concluir com sucesso antes de considerar o pacote implantado.
+- Regressão E2E em navegador real continua obrigatória antes de promover para `main`.
+
+### Problemas conhecidos / próximos passos
+- Depois da regressão E2E, remover definitivamente o fallback legado de `api/_db.js`.
+- Migrar a criação/alteração de schema em runtime para migrations versionadas.
+- Planejar a migração dos identificadores locais legados para unicidade por empresa + usuário.
+- Confirmar banco independente entre Preview e Produção antes de testes destrutivos.
+- Adicionar suíte automatizada de testes E2E para login, 2FA, offline/online, permissões e troca de usuários.
+
 ## v3.5.0-premium-test — Isolamento local por usuário
 
 ### Novas funcionalidades
