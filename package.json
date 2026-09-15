@@ -1,7 +1,7 @@
 {
   "name": "orcafacil-pro",
   "private": true,
-  "version": "3.5.0-premium-test",
+  "version": "3.6.0-premium-test",
   "dependencies": {
     "@neondatabase/serverless": "1.1.0",
     "qrcode": "^1.5.4",
