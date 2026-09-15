@@ -17,12 +17,17 @@ async function ensurePremiumSchema(sql) {
           owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           budget_id uuid NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
           created_at timestamptz NOT NULL DEFAULT now(),
+          expires_at timestamptz NOT NULL DEFAULT (now() + interval '30 days'),
           viewed_at timestamptz,
           responded_at timestamptz,
           response_status text,
           UNIQUE(company_id, owner_user_id, budget_id)
         )
       `;
+      await sql`ALTER TABLE public_budget_links ADD COLUMN IF NOT EXISTS expires_at timestamptz`;
+      await sql`UPDATE public_budget_links SET expires_at=created_at + interval '30 days' WHERE expires_at IS NULL`;
+      await run(sql, `ALTER TABLE public_budget_links ALTER COLUMN expires_at SET DEFAULT (now() + interval '30 days')`);
+      await run(sql, `ALTER TABLE public_budget_links ALTER COLUMN expires_at SET NOT NULL`);
 
       await sql`
         CREATE TABLE IF NOT EXISTS receivables (
@@ -42,6 +47,7 @@ async function ensurePremiumSchema(sql) {
       `;
 
       await sql`CREATE INDEX IF NOT EXISTS idx_public_budget_links_token ON public_budget_links(token)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_public_budget_links_expiry ON public_budget_links(expires_at)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_receivables_owner_due ON receivables(company_id, owner_user_id, due_date)`;
 
       await run(sql, 'ALTER TABLE receivables ENABLE ROW LEVEL SECURITY');
