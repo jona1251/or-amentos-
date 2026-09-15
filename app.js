@@ -1,6 +1,6 @@
 (async()=>{
-  const VERSION='premiumtest18';
-  const critical=['cloud-sync.js','app-core.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-isolation.js','app-rate-limit.js','app-2fa-login.js','app-settings.js','app-logout-fix.js','app-cookies.js','app-security-panel.js','app-online-mode.js','app-access-enforcement.js'];
+  const VERSION='premiumtest19';
+  const critical=['cloud-sync.js','app-core.js','app-local-scope.js','app-budget.js','app-contract.js','app-users.js','app-users-security.js','app-polish.js','app-isolation.js','app-rate-limit.js','app-2fa-login.js','app-settings.js','app-logout-fix.js','app-cookies.js','app-security-panel.js','app-online-mode.js','app-access-enforcement.js'];
   const deferred=['app-premium.js','app-login-notifications.js','app-suite.js','app-suite-extras.js','app-user-permissions.js','app-dashboard-tools.js','app-budget-payments-unified.js','app-clean-ui.js','app-profile-presets-ui.js','app-admin-dashboard.js'];
 
   const load=file=>new Promise((resolve,reject)=>{
