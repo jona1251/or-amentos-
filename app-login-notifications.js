@@ -5,18 +5,11 @@
   let current=[];
   let unread=0;
 
-  function authHeaders(){
-    return {
-      'Content-Type':'application/json',
-      'x-orca-auth':window.auth?.pinHash||'',
-      'x-orca-user':window.auth?.login||'admin'
-    };
-  }
-
   async function request(method='GET',body){
     const res=await fetch('/api/notifications',{
       method,
-      headers:authHeaders(),
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
       body:body?JSON.stringify(body):undefined,
       cache:'no-store'
     });
@@ -133,7 +126,7 @@
   }
 
   async function load(){
-    if(!window.auth?.pinHash){visibleForPrimary=false;render();return}
+    if(!window.auth){visibleForPrimary=false;render();return}
     try{
       const data=await request('GET');
       visibleForPrimary=!!data.isPrimaryAdmin;
