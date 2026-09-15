@@ -65,14 +65,8 @@ function updatePendingState() {
   else if (!cloudReady) cloudSetState('offline','Modo local');
 }
 
-async function cloudRequest(url, options = {}, token, loginOverride) {
+async function cloudRequest(url, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  // Compatibilidade temporária: o servidor agora prefere a sessão HttpOnly, mas clientes
-  // antigos ainda podem autenticar com estes cabeçalhos durante a migração.
-  const key = token || window.auth?.pinHash;
-  const login = loginOverride || window.auth?.login;
-  if (key) headers['x-orca-auth'] = key;
-  if (login) headers['x-orca-user'] = login;
   const res = await fetch(url, { ...options, headers, credentials:'same-origin' });
   let body = {};
   try { body = await res.json(); } catch (_) {}
@@ -91,7 +85,7 @@ window.cloudIsReady = () => cloudReady;
 
 async function cloudStatus() {
   try {
-    const r = await cloudRequest('/api/auth', { method:'GET' }, null, null);
+    const r = await cloudRequest('/api/auth', { method:'GET' });
     cloudLastStatus = r;
     cloudReady = !!r.online;
     if (window.cloudNeedsReauth) cloudSetState('pending','Nuvem online • autenticação necessária');
@@ -106,15 +100,18 @@ async function cloudStatus() {
 }
 
 async function cloudRegisterCurrent() {
-  if (!window.auth?.pinHash) return false;
+  const registerHash = window.auth?.pendingRegistrationPinHash;
+  if (!window.auth || !registerHash) return false;
   const login = (window.auth.login || 'admin').toLowerCase();
   try {
     const r = await cloudRequest('/api/auth', {
       method:'POST',
-      body:JSON.stringify({ action:'register', name:window.auth.name || 'Administrador', login, pinHash:window.auth.pinHash })
-    }, null, login);
+      body:JSON.stringify({ action:'register', name:window.auth.name || 'Administrador', login, pinHash:registerHash })
+    });
     if (r.user) {
       const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name, serverId:r.user.id || window.auth.serverId || null };
+      delete next.pendingRegistrationPinHash;
+      delete next.pinHash;
       window.setAppAuth?.(next);
       await window.localPut('auth', next);
     }
@@ -128,33 +125,23 @@ async function cloudRegisterCurrent() {
 }
 
 async function cloudVerifyCurrent() {
-  if (!window.auth?.pinHash) return false;
+  if (!window.auth) return false;
   const login = (window.auth.login || 'admin').toLowerCase();
   window.cloudLastVerifyError = null;
   try {
-    // Reaproveita primeiro a sessão HttpOnly válida e evita recriar sessão a cada abertura.
     let status = cloudLastStatus;
-    if (!status) status = await cloudRequest('/api/auth',{method:'GET'},null,null);
+    if (!status) status = await cloudRequest('/api/auth',{method:'GET'});
     cloudLastStatus = status;
     if (status?.hasSession && status.sessionUser && String(status.sessionUser.login||'').toLowerCase() === login) {
       const u = status.sessionUser;
       const next = { ...window.auth, login:u.login || login, role:u.role || window.auth.role || 'operador', name:u.name || window.auth.name, serverId:u.id || window.auth.serverId || null };
+      delete next.pinHash;
       window.setAppAuth?.(next);
       await window.localPut('auth',next);
       return true;
     }
-
-    const r = await cloudRequest('/api/auth', {
-      method:'POST',
-      body:JSON.stringify({ action:'login', login, pinHash:window.auth.pinHash })
-    }, null, login);
-    if (r.user) {
-      const next = { ...window.auth, login:r.user.login || login, role:r.user.role || 'admin', name:r.user.name || window.auth.name, serverId:r.user.id || window.auth.serverId || null };
-      window.setAppAuth?.(next);
-      await window.localPut('auth', next);
-    }
-    cloudLastStatus = null;
-    return true;
+    window.cloudLastVerifyError='SESSION_REQUIRED';
+    return false;
   } catch (e) {
     window.cloudLastVerifyError = e.message;
     window.cloudRetryAfter = Number(e.retryAfter || 0);
@@ -181,7 +168,7 @@ function requireCloudLogin(message='Entre novamente para sincronizar com a nuvem
 window.requireCloudLogin = requireCloudLogin;
 
 async function cloudUploadAll() {
-  if (!cloudReady || !window.auth?.pinHash) return;
+  if (!cloudReady || !window.auth) return;
   cloudSetState('sync','Enviando dados iniciais...');
   const order = ['settings','clients','products','budgets','contracts'];
   for (const store of order) {
@@ -194,12 +181,11 @@ async function cloudUploadAll() {
 }
 
 async function flushPendingMutations() {
-  if (!cloudReady || navigator.onLine===false || window.cloudNeedsReauth || !window.auth?.pinHash) return false;
-  let rows = readPendingMutations();
+  if (!cloudReady || navigator.onLine===false || window.cloudNeedsReauth || !window.auth) return false;
+  const rows = readPendingMutations();
   if (!rows.length) { updatePendingState(); return true; }
   cloudSetState('sync',`Sincronizando ${rows.length} alteração${rows.length===1?'':'ões'}...`);
   for (const mutation of rows) {
-    // Se uma edição mais nova substituiu esta mutação enquanto aguardávamos, não envia a antiga.
     const current = readPendingMutations().find(x=>x.key===mutation.key);
     if (!current || current.token !== mutation.token) continue;
     try {
@@ -212,7 +198,6 @@ async function flushPendingMutations() {
     } catch (e) {
       if (e.status === 401) { requireCloudLogin(); break; }
       if (e.status === 403 || e.status === 400) {
-        // Erros permanentes não podem bloquear a fila para sempre.
         console.warn('Alteração descartada pelo servidor:',e.message,mutation.store,mutation.id);
         removeMutationIfCurrent(mutation.token);
         window.toast?.(e.status===403?'Uma alteração não foi sincronizada por falta de permissão':'Uma alteração inválida foi descartada');
@@ -228,7 +213,7 @@ async function flushPendingMutations() {
 window.flushCloudPending = flushPendingMutations;
 
 async function cloudPull() {
-  if (!cloudReady || !window.auth?.pinHash || window.cloudNeedsReauth) return;
+  if (!cloudReady || !window.auth || window.cloudNeedsReauth) return;
   cloudSetState('sync','Baixando dados...');
   const r = await cloudRequest('/api/data',{method:'GET'});
   const data = r.data || {};
@@ -257,9 +242,8 @@ async function cloudInitialSync(existingLocalUser) {
     const allowed = await cloudVerifyCurrent();
     if (!allowed) {
       let status = null;
-      try { status = cloudLastStatus || await cloudRequest('/api/auth',{method:'GET'},null,null); } catch (_) {}
+      try { status = cloudLastStatus || await cloudRequest('/api/auth',{method:'GET'}); } catch (_) {}
 
-      // Upload completo só é permitido no primeiro cadastro de uma nuvem vazia.
       if (status?.online && status.hasUser === false) {
         const registered = await cloudRegisterCurrent();
         if (registered) {
@@ -276,11 +260,7 @@ async function cloudInitialSync(existingLocalUser) {
       if (status?.online) {
         cloudReady = true;
         cloudSetState('pending','Nuvem online • autenticação necessária');
-        requireCloudLogin(
-          window.cloudLastVerifyError === 'RATE_LIMITED'
-            ? 'Seu acesso está temporariamente bloqueado. Aguarde e entre novamente.'
-            : 'Sua sessão local não corresponde à conta da nuvem. Entre novamente com seu usuário e PIN.'
-        );
+        requireCloudLogin('Sua sessão da nuvem expirou. Entre novamente com seu usuário e PIN.');
         return false;
       }
 
@@ -290,8 +270,6 @@ async function cloudInitialSync(existingLocalUser) {
     }
 
     window.cloudNeedsReauth = false;
-    // Em contas existentes, a fila é a única fonte de alterações locais pendentes.
-    // Isso evita que um snapshot local antigo sobrescreva dados novos da nuvem.
     await flushPendingMutations();
     await cloudPull();
     window.refreshUserAccessUI?.();
@@ -307,7 +285,16 @@ async function cloudInitialSync(existingLocalUser) {
 window.cloudAfterInit = async function() {
   const status = await cloudStatus();
   if (!status) { window.refreshUserAccessUI?.(); return; }
-  const hasLocal = !!window.auth?.pinHash;
+  let hasLocal = !!window.auth;
+
+  if (status.hasSession && status.sessionUser && !hasLocal) {
+    const u=status.sessionUser;
+    const next={id:'admin',serverId:u.id||null,name:u.name||'Usuário',login:u.login||'admin',role:u.role||'operador'};
+    window.setAppAuth?.(next);
+    await window.localPut('auth',next);
+    hasLocal=true;
+  }
+
   if (hasLocal && !window.auth.login) {
     const next = { ...window.auth, login:'admin', role:window.auth.role || 'admin' };
     window.setAppAuth?.(next);
@@ -331,8 +318,9 @@ window.cloudLoginByPin = async function(pin, login='admin', silent=false) {
     window.cloudLastLoginError = null;
     const normalizedLogin = String(login || 'admin').trim().toLowerCase();
     const pinHash = await window.hash(pin);
-    const r = await cloudRequest('/api/auth',{method:'POST',body:JSON.stringify({action:'login',login:normalizedLogin,pinHash})},null,normalizedLogin);
-    const newAuth = { id:'admin', serverId:r.user?.id || null, name:r.user?.name || 'Usuário', login:r.user?.login || normalizedLogin, role:r.user?.role || 'operador', pinHash };
+    const r = await cloudRequest('/api/auth',{method:'POST',body:JSON.stringify({action:'login',login:normalizedLogin,pinHash})});
+    const offlinePinHash = window.orcaCredentialsFromPin ? (await window.orcaCredentialsFromPin(normalizedLogin,pin)).offlinePinHash : pinHash;
+    const newAuth = { id:'admin', serverId:r.user?.id || null, name:r.user?.name || 'Usuário', login:r.user?.login || normalizedLogin, role:r.user?.role || 'operador', offlinePinHash };
     window.setAppAuth?.(newAuth);
     await window.localPut('auth',newAuth);
     window.cloudNeedsReauth = false;
@@ -364,7 +352,7 @@ window.cloudAfterLogin = function() {
 };
 
 window.cloudAfterPut = function(store,record) {
-  if (cloudSyncing || store === 'auth' || !window.auth?.pinHash) return;
+  if (cloudSyncing || store === 'auth' || !window.auth) return;
   const id = String(record?.id || (store==='settings'?'main':'')).trim();
   if (!id) return;
   enqueueMutation('put',store,id,record);
@@ -373,7 +361,7 @@ window.cloudAfterPut = function(store,record) {
 };
 
 window.cloudAfterDelete = function(store,id) {
-  if (cloudSyncing || !window.auth?.pinHash || !['clients','products','budgets','contracts'].includes(store)) return;
+  if (cloudSyncing || !window.auth || !['clients','products','budgets','contracts'].includes(store)) return;
   enqueueMutation('delete',store,id,null);
   if (!cloudReady || window.cloudNeedsReauth || navigator.onLine===false) return;
   cloudQueue = cloudQueue.then(flushPendingMutations).catch(e=>{console.warn(e);updatePendingState()});
@@ -382,7 +370,7 @@ window.cloudAfterDelete = function(store,id) {
 window.addEventListener('online',()=>{
   cloudQueue = cloudQueue.then(async()=>{
     const status = await cloudStatus();
-    if (!status || !window.auth?.pinHash || window.cloudNeedsReauth) return;
+    if (!status || !window.auth || window.cloudNeedsReauth) return;
     const ok = await flushPendingMutations();
     if (ok) await cloudPull();
   }).catch(e=>console.warn('Reconexão:',e));
