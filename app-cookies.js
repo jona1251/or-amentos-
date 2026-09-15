@@ -37,7 +37,7 @@
   if(typeof baseCreate==='function'){
     window.createAccess=async function(){
       const out=await baseCreate.apply(this,arguments);
-      if(window.auth?.pinHash)rememberUser();
+      if(window.auth)rememberUser();
       return out;
     };
   }
