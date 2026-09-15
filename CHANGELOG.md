@@ -14,8 +14,11 @@
 - Corrigida perda de alterações feitas offline após recarregar ou reconectar.
 - Corrigido N+1 na leitura dos itens de orçamento: os itens agora são carregados em lote.
 - Corrigido acesso direto à API principal sem respeitar permissões de módulos.
+- Corrigido acesso direto às funções avançadas do `/api/suite` sem autorização fina por módulo.
 - Custos de produtos passam a ser omitidos/protegidos quando o usuário não possui permissão de custos.
-- Exclusões pela API exigem tanto acesso ao módulo quanto permissão de excluir.
+- Exclusões pela API principal exigem tanto acesso ao módulo quanto permissão de excluir.
+- Registros avançados são filtrados por grupo de permissão (Operações, CRM, Financeiro, Relatórios, Contratos e Segurança).
+- Administradores continuam com acesso total automático e não podem receber um conjunto parcial de permissões pela API avançada.
 - Aprovação/recusa pública de orçamento agora é de resposta única, inclusive contra requisições concorrentes.
 - Assinatura pública agora é de uso único mesmo em requisições concorrentes.
 - Links públicos de orçamento expirados deixam de aceitar resposta.
@@ -29,6 +32,7 @@
 - O cabeçalho legado com hash do PIN continua temporariamente apenas para compatibilidade durante a migração.
 - Permissões de clientes, produtos, orçamentos, contratos, configurações e exclusões agora são validadas no servidor da API principal.
 - Financeiro, recebimentos, PIX e compartilhamento de orçamento receberam validação de permissão no servidor.
+- A API avançada valida permissões por tipo de registro e por ação sensível, incluindo 2FA, sessões, backups, links públicos e expiração de orçamentos.
 - Páginas públicas receberam cabeçalhos contra framing, sniffing e vazamento de referência.
 
 ### Banco de dados
@@ -44,14 +48,15 @@
 
 ### Testes e validação
 - Validação de build/deploy pela integração GitHub → Vercel.
-- Revisão estática dos fluxos de autenticação, sincronização, RLS, permissões, aprovação pública e assinatura.
+- Revisão estática dos fluxos de autenticação, sincronização, RLS, permissões, API avançada, aprovação pública e assinatura.
 - Teste E2E completo em navegador real ainda deve ser executado antes de promoção para `main`.
 
 ### Problemas conhecidos / próximos passos
-- O endpoint `/api/suite` ainda precisa de autorização fina por módulo para todas as funções avançadas; o isolamento por proprietário/RLS permanece ativo.
+- O mapeamento de permissões dos registros avançados precisa de regressão E2E em cada fluxo da interface antes da promoção para produção.
 - Os stores IndexedDB continuam globais no navegador; a próxima evolução estrutural deve criar namespace local por usuário.
 - Os identificadores locais das tabelas principais ainda usam unicidade por empresa em alguns schemas legados; migrar para unicidade por empresa + usuário exige migração controlada.
 - A criação/alteração de schema ainda acontece em funções de inicialização; migrar para migrations versionadas é recomendado antes da produção definitiva.
+- O hash do PIN ainda existe no cliente para compatibilidade/offline; a migração final deve usar credencial local separada e sessão de servidor sem reutilizar esse hash nas requisições.
 - A separação de banco entre Preview e Produção precisa ser confirmada antes de testes destrutivos ou promoção.
 
 ## v3.3.0-premium-test
